@@ -122,8 +122,8 @@ Whichever row of either table applies, **§5.3a is applied first**: content that
 |---|---|---|
 | Periodic sync `syncIntervalMinutes` | Enabled (default 15 minutes, 0 = manual only) | Disabled (it does not fire because of the `!Platform.isMobile` guard in `applyAutoSyncInterval`; the initial mobile default is **0** = manual only, which matches the display of the disabled slider) |
 | Sync on edit (watch) `watchOnChangeEnabled` | Default true (about 2 seconds debounce after editing stops). **File and folder create / modify / delete / rename are propagated immediately**: for files, create/modify -> **single-file sync (§5.7 below)**, delete -> **remote deletion (to the trash) with a safety decision**, rename -> MOVE; for folders, create -> MKCOL (idempotent), delete -> collection deletion (tracked folders only, to the trash), rename -> MOVE (all immediate, no debounce). Events caused by the plugin's own writes (such as parent-folder creation during a download) are suppressed with the ignore list to prevent the reverse flow. While propagating immediately, the status bar shows "syncing" (FR-011). Failures converge through the next full-scan `reconcileDirectories` | **Enabled.** The initial default is OFF (§15). It runs only while the app is in the foreground, and anything missed is picked up by the next full sync. It is subject to Wi-Fi only (§5.7c) |
-| Startup sync `startupSyncDelaySeconds` | Default 1 (`>0` enables, `0` disables) | **Default 1 (mobile also has startup sync ON)** |
-| **Foreground-resume sync** (`RSY-1` to `RSY-3`, GitHub discussion #44) | **Enabled (no platform branching)** | **Enabled** |
+| Startup sync `startupSyncDelaySeconds` | Default 1 (`>0` enables, `0` disables) | **Default 1 (mobile also has startup sync ON).** Silent unless it transfers files, or ends with errors or unresolved conflicts (§11) |
+| **Foreground-resume sync** (`RSY-1` to `RSY-3`, GitHub discussion #44) | **Enabled (no platform branching)** | **Enabled.** Silent unless it transfers files, or ends with errors or unresolved conflicts (§11) |
 | Wi-Fi only `syncOnWifiOnly` | Default false (`navigator.connection.type` cannot be obtained, so it is **effectively disabled**) | Default true (**effective on Android only**, **not supported on iOS**). Applies to both full sync and watch (§5.7c) |
 | Concurrency `networkConcurrency` | Derived from device RAM (see below, no platform branching) | Same |
 | Debug features | Enabled | Disabled |
@@ -610,7 +610,16 @@ An atomic write (`atomicWrite` / `atomicWriteBinary`) is a "write to a temporary
 
 ## §11. Mobile support
 
-`isDesktopOnly` is `false`, and desktop behaviour stays 100% backward compatible. Feedback uses `NoticeStatusBar` (a Notice toast that auto-dismisses after 4 seconds on success and 10 seconds on failure, reuses one toast for progress, is shown in English, and is also shown for a sync with zero changes). The trigger branching is in §5.4. `maxFileSizeMB` defaults to 20 on mobile (0 = unlimited on desktop).
+`isDesktopOnly` is `false`, and desktop behaviour stays 100% backward compatible. Feedback uses `NoticeStatusBar` (a Notice toast that auto-dismisses after 4 seconds on success and 10 seconds on failure, reuses one toast for progress, and is shown in English). The trigger branching is in §5.4.
+
+**Quiet automatic syncs** (`NQT-1` to `NQT-8`, GitHub discussion #65): a sync that the user did not start (startup, foreground-resume, periodic and watch-on-edit syncs) stays silent until there is something to report, so reopening the app no longer shows a toast to dismiss every time. The engine reports the kind through `IStatusBar.setStatus('syncing', { automatic })`; omitting `automatic` means a manual sync. There is no setting for this.
+
+- **Automatic sync, nothing to report** (uploads + downloads = 0, no errors, no unresolved conflicts): no toast at all, neither at the start nor at the end (`NQT-1`). A toast that is still visible from an earlier sync is left alone (`NQT-5`).
+- **Automatic sync, news**: the toast appears when the first progress is reported (`NQT-2`), or at the end when there are errors or unresolved conflicts even with zero transfers (`NQT-3`). Texts and dismiss times are unchanged (4 s on success, 10 s on errors or conflicts).
+- **Manual sync** ("Sync now", ribbon or command; and Mirror from remote): unchanged. "Syncing…" is shown at the start and the result at the end, including "Up to date" for zero changes (`NQT-4`).
+- **Watch-on-edit** reports each single-file sync as automatic, so it never leaves a "Syncing…" toast behind (`NQT-8`). The engine passes `{ automatic: true }` for syncs other than "Sync now" (`NQT-7`).
+- The quiet state is recomputed at the start of every sync, so it never leaks into the next one, and at most one toast is alive at a time (`NQT-6`).
+- Not changed: the "A sync is already in progress", Wi-Fi-only skip and "Sync failed" notices, and the desktop status bar. `maxFileSizeMB` defaults to 20 on mobile (0 = unlimited on desktop).
 
 ### §11.1 Remote URL encoding (`URE-1` to `URE-5`, GitHub issue #25)
 
