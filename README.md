@@ -31,9 +31,9 @@ This plugin is still young and some behaviour can be rough around the edges. **P
 
 ---
 
-## What's new in this release (1.0.12-beta.1)
+## What's new in this release (1.0.12-beta.2)
 
-- **No change to the plugin (1.0.12-beta.1)** — this build behaves exactly like 1.0.11. The change is in the project's own test suite: the Android test layer runs its emulated device in a container, and that container used to rewrite kernel settings of the machine running the tests. It is now confined so that a test run leaves the machine as it was.
+- **Quieter automatic syncs on mobile (1.0.12-beta.2)** — a sync that you did not start (startup, returning to the app, periodic, or sync-on-edit) no longer shows a toast when nothing was transferred and there are no errors or conflicts, so reopening Obsidian does not leave a notification to dismiss. Errors and conflicts are still reported, and "Sync now" and "Mirror from remote" show their toasts as before. A sync-on-edit toast that could stay on screen is also gone. There is no new setting.
 
 For the full version history of every release, see the **[changelog](CHANGELOG.md)**.
 
