@@ -1,7 +1,7 @@
 import { SyncStatus } from '../types';
 
 export interface IStatusBar {
-  setStatus(status: SyncStatus): void;
+  setStatus(status: SyncStatus, opts?: { automatic?: boolean }): void;
   setProgress(processed: number, total: number): void;
   setConflictCount(count: number): void;
   setErrorCount(count: number): void;

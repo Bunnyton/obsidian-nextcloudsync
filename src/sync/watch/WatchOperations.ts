@@ -90,7 +90,7 @@ export class WatchOperations {
   // Guarded by the running check so it never fights a concurrent full sync, which owns the status during its run.
   private begin(): void {
     this.inFlight++;
-    if (!this.deps.isSyncRunning()) this.deps.statusBar.setStatus('syncing');
+    if (!this.deps.isSyncRunning()) this.deps.statusBar.setStatus('syncing', { automatic: true });
   }
 
   private end(): void {

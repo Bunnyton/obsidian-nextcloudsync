@@ -325,7 +325,7 @@ export class SyncEngine {
     // Set the balking flag synchronously (before any await) so a concurrent call still balks.
     this.running = true;
     this.cancelled = false;
-    const run = this.runSyncSession();
+    const run = this.runSyncSession(opts.manual === true);
     this.currentRun = run;
     try {
       await run;
@@ -340,7 +340,7 @@ export class SyncEngine {
     }
   }
 
-  private async runSyncSession(): Promise<void> {
+  private async runSyncSession(manual: boolean): Promise<void> {
     // Created before the try so catch/finally can reference them even if the first step fails.
     const summary = this.initSummary();
     this.journal.beginRun(summary.startedAt);
@@ -352,7 +352,7 @@ export class SyncEngine {
       void this.opts.logger?.log('sync: connecting (ensureClient)');
       await this.ensureClient();
       this.syncProgress = { processed: 0, total: 0 };
-      this.opts.statusBar.setStatus('syncing');
+      this.opts.statusBar.setStatus('syncing', { automatic: !manual });
 
       const isFirstSync = !this.opts.stateDB.getSyncToken() && this.opts.stateDB.getAllFiles().length === 0;
 

@@ -727,4 +727,14 @@ export const CLAUSES: Clause[] = [
   // FMI: the getFrontMatterInfo test double equals the real Obsidian (docs/spec.md §16).
   { id: 'FMI-1', source: 'docs/spec.md §16 (the real getFrontMatterInfo returns the recorded corpus values)', layer: 'b-2' },
   { id: 'FMI-2', source: 'docs/spec.md §16 (the test double returns the same recorded corpus values)', layer: 'a' },
+
+  // NQT: automatic syncs stay silent until there is something to report (docs/spec.md §11).
+  { id: 'NQT-1', source: 'specs/099-quiet-mobile-sync-toast FR-001/FR-003 (an automatic sync with zero uploads, downloads, errors and conflicts creates no toast at all)', layer: 'a' },
+  { id: 'NQT-2', source: 'specs/099-quiet-mobile-sync-toast FR-002/FR-005 (an automatic sync creates the toast when progress is first reported, rewrites it to the Synced result on completion, and it disappears after 4 seconds)', layer: 'a' },
+  { id: 'NQT-3', source: 'specs/099-quiet-mobile-sync-toast FR-004 (an automatic sync with an error or conflict shows the result toast for 10 seconds even when nothing was transferred)', layer: 'a' },
+  { id: 'NQT-4', source: 'specs/099-quiet-mobile-sync-toast FR-006 (a manual sync keeps the Syncing toast at start and shows Up to date when nothing changed)', layer: 'a' },
+  { id: 'NQT-5', source: 'specs/099-quiet-mobile-sync-toast Edge Cases (a result toast already on screen is neither rewritten nor replaced when a silent automatic sync finishes)', layer: 'a' },
+  { id: 'NQT-6', source: 'specs/099-quiet-mobile-sync-toast FR-009 (silence never leaks into the next sync: automatic then manual, automatic then automatic; at most one live toast at a time)', layer: 'a' },
+  { id: 'NQT-7', source: 'specs/099-quiet-mobile-sync-toast D3 (syncManual() with no argument passes automatic: true to setStatus, syncManual({ manual: true }) passes automatic: false)', layer: 'a' },
+  { id: 'NQT-8', source: 'specs/099-quiet-mobile-sync-toast FR-007/D4 (a watch-triggered sync start passes automatic: true to setStatus, so no Syncing toast is created)', layer: 'a' },
 ];

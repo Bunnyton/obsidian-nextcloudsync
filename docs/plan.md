@@ -691,3 +691,5 @@ Network:  WebDAVFactory / NextcloudClient (extended PROPFIND, sync-token, OCS, c
 Data:     LocalAdapter (atomic, IgnoreList) / StateDB (per device, atomic, recovery) / MergeBaseStore (per device, 3-way base) / SyncHistoryStore
 Core:     main.ts (initialisation, DI, lifecycle, command registration)
 ```
+
+**Status-bar surface (docs/spec.md §11).** `IStatusBar.setStatus(status, opts?: { automatic?: boolean })` carries whether a sync was started by the user. `SyncEngine.runSyncSession(manual)` and `WatchOperations.begin()` pass `{ automatic: true }` for syncs the user did not start; `MirrorService` and "Sync now" omit it. The optional second argument keeps existing `IStatusBar` stubs valid. `NoticeStatusBar` keeps a private `quiet` flag: `setStatus('syncing', …)` sets it from `automatic` (and creates no toast when quiet), `setProgress` clears it (the toast appears once there are transfers), and `setSyncComplete` stays silent only when quiet and there is nothing to report (no transfers, errors or unresolved conflicts). The flag is recomputed at every sync start, so it holds no state across syncs.
