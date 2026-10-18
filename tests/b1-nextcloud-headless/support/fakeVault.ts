@@ -46,13 +46,13 @@ export class FakeVault {
         if (!e) throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
         return dec(e.data);
       },
-      async write(p: string, d: string): Promise<void> { addAncestors(p); store.set(p, { data: enc(d), mtime: Date.now() }); },
+      async write(p: string, d: string, options?: { mtime?: number }): Promise<void> { addAncestors(p); store.set(p, { data: enc(d), mtime: options?.mtime ?? Date.now() }); },
       async readBinary(p: string): Promise<ArrayBuffer> {
         const e = store.get(p);
         if (!e) throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
         return e.data;
       },
-      async writeBinary(p: string, d: ArrayBuffer): Promise<void> { addAncestors(p); store.set(p, { data: d, mtime: Date.now() }); },
+      async writeBinary(p: string, d: ArrayBuffer, options?: { mtime?: number }): Promise<void> { addAncestors(p); store.set(p, { data: d, mtime: options?.mtime ?? Date.now() }); },
       async exists(p: string): Promise<boolean> { return store.has(p) || self.folderExists(p); },
       async remove(p: string): Promise<void> { store.delete(p); explicitFolders.delete(p); },
       async rename(from: string, to: string): Promise<void> {

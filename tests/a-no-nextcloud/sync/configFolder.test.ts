@@ -159,7 +159,6 @@ describe('[SPEC:CSF-12] config JSON conflict resolves via Other File / latest-mt
       readBinary: jest.fn(async () => toBuf2('{"a":1}')),
       atomicWrite: jest.fn(async () => undefined),
       atomicWriteBinary,
-      setMtime: jest.fn(async () => undefined),
     };
     const setRemoteRootEtag = jest.fn();
     const stateDB = { setFile, getFile: jest.fn(() => undefined), setRemoteRootEtag };

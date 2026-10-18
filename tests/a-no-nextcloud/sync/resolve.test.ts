@@ -43,7 +43,6 @@ function makeEngine(cfg: Cfg) {
     stat: jest.fn(async () => (cfg.localStat === undefined ? { size: 5, mtime: 111000 } : cfg.localStat)),
     readBinary: jest.fn(async () => buf(cfg.localContent ?? 'local')),
     atomicWriteBinary: jest.fn(async (_path: string, _data: ArrayBuffer) => {}),
-    setMtime: jest.fn(async (_path: string, _mtime: number) => {}),
   };
 
   const engine = new SyncEngine({

@@ -51,7 +51,6 @@ async function recordAfterUpload(
     localAdapter: {
       stat: async () => ({ size: BODY.length, mtime: 1000 }),
       readBinary: async () => new TextEncoder().encode(BODY).buffer,
-      setMtime: async () => undefined,
     },
     stateDB,
     journal: new SyncJournal({}) as unknown as SyncJournal,

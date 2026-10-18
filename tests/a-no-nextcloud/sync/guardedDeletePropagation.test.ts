@@ -109,7 +109,6 @@ async function buildEngine(
     atomicWrite: jest.fn(async (p: string, d: string) => { vault[p] = d; }),
     atomicWriteBinary: jest.fn(async (p: string, d: ArrayBuffer) => { vault[p] = dec.decode(d); }),
     writeBinary: jest.fn(async (p: string, d: ArrayBuffer) => { vault[p] = dec.decode(d); }),
-    setMtime: jest.fn(),
     remove: jest.fn(async (p: string) => { delete vault[p]; }),
     ignore: jest.fn((p: string) => { events.push(`ignore:${p}`); }),
   };

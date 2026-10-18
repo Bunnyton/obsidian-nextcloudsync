@@ -60,6 +60,10 @@ function build(o: Opts = {}, over: Partial<ConflictDeps> = {}) {
   const calls = {
     wrote: [] as string[],
     wroteBinary: [] as string[],
+    // Third argument (mtime) seen by each write, in call order.
+    wroteMtime: [] as Array<number | undefined>,
+    wroteBinaryMtime: [] as Array<number | undefined>,
+    uploadMtime: [] as Array<number | undefined>,
     setFile: [] as FileState[],
     history: [] as string[],
     retries: [] as string[],
@@ -75,7 +79,8 @@ function build(o: Opts = {}, over: Partial<ConflictDeps> = {}) {
   } as unknown as IWebDAVClient;
 
   const uploadStrategy = {
-    upload: async () => {
+    upload: async (_c: unknown, _p: string, _d: ArrayBuffer, mtime?: number) => {
+      calls.uploadMtime.push(mtime);
       if (o.upload === 'throw') throw new Error('transient');
       return o.upload === 'skipped' ? 'skipped' : 'uploaded';
     },
@@ -87,11 +92,12 @@ function build(o: Opts = {}, over: Partial<ConflictDeps> = {}) {
       stat: async () => ({ size: local.size, mtime: local.mtime }),
       read: async () => onDisk,
       readBinary: async () => new TextEncoder().encode(onDisk).buffer,
-      atomicWrite: async (p: string, c: string) => { calls.wrote.push(p); onDisk = c; },
-      atomicWriteBinary: async (p: string, d: ArrayBuffer) => {
-        calls.wroteBinary.push(p); onDisk = new TextDecoder().decode(d);
+      atomicWrite: async (p: string, c: string, mtime?: number) => {
+        calls.wrote.push(p); calls.wroteMtime.push(mtime); onDisk = c;
       },
-      setMtime: async () => { /* noop */ },
+      atomicWriteBinary: async (p: string, d: ArrayBuffer, mtime?: number) => {
+        calls.wroteBinary.push(p); calls.wroteBinaryMtime.push(mtime); onDisk = new TextDecoder().decode(d);
+      },
     } as unknown as ConflictDeps['localAdapter'],
     stateDB: {
       getFile: () => base(),
@@ -244,7 +250,7 @@ describe('ConflictApplier — capturing the clean sides before a marker write', 
 });
 
 describe('ConflictApplier.resolveByWrite — a failed push must not read as converged', () => {
-  const CLEAN_ARGS = ['note.md', 'merged body\n', true, remoteInfo(), 'old-remote', 'etag' as const, 1000] as const;
+  const CLEAN_ARGS = ['note.md', 'merged body\n', true, remoteInfo(), 'old-remote', 'etag' as const] as const;
 
   it('records the merged body as the baseline once it reached the server', async () => {
     const { applier, conn, calls } = build({ upload: 'ok' });
@@ -288,7 +294,7 @@ describe('ConflictApplier.resolveByWrite — a failed push must not read as conv
   it('keeps a marker write conflicted even when it uploaded fine', async () => {
     const { applier, conn, calls } = build({ upload: 'ok' });
     const s = summary();
-    await applier.resolveByWrite(conn, 'note.md', 'markers\n', false, remoteInfo(), 'old-remote', 'etag', 1000, s);
+    await applier.resolveByWrite(conn, 'note.md', 'markers\n', false, remoteInfo(), 'old-remote', 'etag', s);
     expect(s.conflictedCount).toBe(1);
     expect(s.mergedCount).toBe(0);
     expect(calls.setFile[0].isConflicted).toBe(true);
@@ -301,6 +307,66 @@ describe('ConflictApplier.resolveByWrite — a failed push must not read as conv
     await applier.resolveByWrite(conn, ...CLEAN_ARGS, s);
     expect(s.uploadedCount).toBe(0);
     expect(calls.setFile[0].isConflicted).toBe(true);
+  });
+});
+
+describe('ConflictApplier.resolveByWrite — one merge time for disk, upload and state [SPEC:MT-4]', () => {
+  const MERGE_TIME = 1_700_000_000_000;
+  let nowSpy: jest.SpyInstance<number, []>;
+  beforeEach(() => { nowSpy = jest.spyOn(Date, 'now').mockReturnValue(MERGE_TIME); });
+  afterEach(() => { nowSpy.mockRestore(); });
+
+  it('passes the single captured Date.now() to atomicWrite, upload and the state mtime [SPEC:MT-4]', async () => {
+    const { applier, conn, calls } = build({ upload: 'ok' });
+    await applier.resolveByWrite(conn, 'note.md', 'merged\n', true, remoteInfo(), 'old-remote', 'etag', summary());
+    expect(calls.wroteMtime).toEqual([MERGE_TIME]);
+    expect(calls.uploadMtime).toEqual([MERGE_TIME]);
+    expect(calls.setFile[0].mtime).toBe(MERGE_TIME);
+  });
+
+  it('reads the clock exactly once per call [SPEC:MT-4]', async () => {
+    const { applier, conn } = build({ upload: 'ok' });
+    await applier.resolveByWrite(conn, 'note.md', 'merged\n', true, remoteInfo(), 'old-remote', 'etag', summary());
+    expect(nowSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('ignores remote.lastModified and the prior local mtime, however extreme [SPEC:MT-4]', async () => {
+    const { applier, conn, calls } = build({
+      upload: 'ok', local: { content: 'x', mtime: 9_999_999_999_999, size: 1 },
+    });
+    await applier.resolveByWrite(
+      conn, 'note.md', 'markers\n', false, remoteInfo({ lastModified: 1 }), 'old-remote', 'etag', summary(),
+    );
+    expect(calls.wroteMtime).toEqual([MERGE_TIME]);
+    expect(calls.uploadMtime).toEqual([MERGE_TIME]);
+    expect(calls.setFile[0].mtime).toBe(MERGE_TIME);
+  });
+
+  it('keeps the merge time in the state after a failed push [SPEC:MT-4]', async () => {
+    const { applier, conn, calls } = build({ upload: 'throw' });
+    await applier.resolveByWrite(conn, 'note.md', 'merged\n', true, remoteInfo(), 'old-remote', 'etag', summary());
+    expect(calls.wroteMtime).toEqual([MERGE_TIME]);
+    expect(calls.setFile[0].mtime).toBe(MERGE_TIME);
+  });
+});
+
+describe('ConflictApplier.resolveByPreferRemote — the remote mtime goes into the write [SPEC:MT-1]', () => {
+  const body = (t: string): ArrayBuffer => new TextEncoder().encode(t).buffer as ArrayBuffer;
+
+  it('passes remote.lastModified as the third argument of atomicWriteBinary [SPEC:MT-1]', async () => {
+    const { applier, calls } = build();
+    await applier.resolveByPreferRemote(
+      'a.txt', remoteInfo({ path: 'a.txt', lastModified: 1_577_836_800_000, size: 4 }), body('abcd'), 'r', 'etag', summary(),
+    );
+    expect(calls.wroteBinaryMtime).toEqual([1_577_836_800_000]);
+  });
+
+  it('omits the mtime (undefined) when the remote has none [SPEC:MT-1]', async () => {
+    const { applier, calls } = build();
+    await applier.resolveByPreferRemote(
+      'a.txt', remoteInfo({ path: 'a.txt', lastModified: 0, size: 4 }), body('abcd'), 'r', 'etag', summary(),
+    );
+    expect(calls.wroteBinaryMtime).toEqual([undefined]);
   });
 });
 
@@ -362,7 +428,6 @@ describe('ConflictApplier.resolveByPreferLocal / resolveByPreferRemote — failu
         readBinary: async () => new ArrayBuffer(1),
         atomicWrite: async () => { /* noop */ },
         atomicWriteBinary: async () => { throw new Error('EACCES'); },
-        setMtime: async () => { /* noop */ },
       } as unknown as ConflictDeps['localAdapter'],
     });
     const s = summary();

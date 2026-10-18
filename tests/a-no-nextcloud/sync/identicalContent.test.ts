@@ -25,7 +25,7 @@ const writeCalls = (l: Local): number =>
 
 const callCounts = (l: Local, download: jest.Mock, upload: jest.Mock): number[] => [
   download.mock.calls.length, upload.mock.calls.length, l.atomicWrite.mock.calls.length,
-  l.atomicWriteBinary.mock.calls.length, l.writeBinary.mock.calls.length, l.setMtime.mock.calls.length,
+  l.atomicWriteBinary.mock.calls.length, l.writeBinary.mock.calls.length,
   l.readBinary.mock.calls.length,
 ];
 
@@ -129,7 +129,6 @@ describe('[SPEC:ICN-3] a remote-only change with an unchanged local signature', 
 
     expect(download).toHaveBeenCalledTimes(1);
     expect(local.atomicWriteBinary).toHaveBeenCalledTimes(0);
-    expect(local.setMtime).toHaveBeenCalledTimes(0);
     expect(upload).toHaveBeenCalledTimes(0);
     expect(summary.downloadedCount).toBe(0);
     const s = stateDB.getFile(PATH);

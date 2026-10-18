@@ -22,8 +22,9 @@ export function withinSafetyWindow(mtime: number, ref: number): boolean {
   return Math.abs(ref - mtime) < SIGNATURE_SAFETY_WINDOW_MS;
 }
 
-// Compares against the stat signature captured right after the plugin's own write, which works on mobile
-// where setMtime is a no-op and the on-disk mtime never equals the remote mtime. Returns false (must hash)
+// Compares against the stat signature captured right after the plugin's own write. A downloaded mtime is
+// set at write time via DataWriteOptions.mtime, and the real post-write stat (not the requested value) is
+// the reference, so it holds on every device. Returns false (must hash)
 // when the signature is absent, size or mtime differs, or mtime is inside the safety window around `now`
 // or `lastSync`. `clock` is accessors, not values, so the common early-return path never reads the state DB.
 export function isLocallyUnchanged(

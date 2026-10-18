@@ -36,7 +36,6 @@ function makeLocalAdapter(seedContent: Record<string, string> = {}) {
     stat: jest.fn(async (p: string) =>
       (p in files ? { size: enc.encode(files[p]).length, mtime: 1_000 } : null)),
     atomicWriteBinary: jest.fn(async (p: string, d: ArrayBuffer) => { files[p] = dec.decode(d); }),
-    setMtime: jest.fn(async () => undefined),
   };
 }
 

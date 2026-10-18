@@ -41,7 +41,7 @@ function build(o: Opts = {}, over: Partial<TransferDeps> = {}) {
     lockAttempts: 0,
     unlocked: [] as string[],
     wrote: [] as string[],
-    setMtime: [] as string[],
+    writeMtime: [] as Array<number | undefined>,
     setFile: [] as FileState[],
     history: [] as string[],
     retries: [] as string[],
@@ -81,10 +81,9 @@ function build(o: Opts = {}, over: Partial<TransferDeps> = {}) {
     localAdapter: {
       stat: async () => (onDisk == null ? null : { size: onDisk.length, mtime: 1234 }),
       readBinary: async () => new TextEncoder().encode(onDisk ?? '').buffer,
-      atomicWriteBinary: async (p: string, d: ArrayBuffer) => {
-        calls.wrote.push(p); onDisk = new TextDecoder().decode(d);
+      atomicWriteBinary: async (p: string, d: ArrayBuffer, mtime?: number) => {
+        calls.wrote.push(p); calls.writeMtime.push(mtime); onDisk = new TextDecoder().decode(d);
       },
-      setMtime: async (p: string) => { calls.setMtime.push(p); },
     } as unknown as TransferDeps['localAdapter'],
     stateDB: {
       getFile: () => o.base,
@@ -209,13 +208,13 @@ describe('TransferService — locking is fixed OFF, and that is the point', () =
 });
 
 describe('TransferService.downloadFile', () => {
-  it('writes the body, preserves the remote mtime, and converges the state DB', async () => {
+  it('writes the body, passes the remote mtime to the write, and converges the state DB [SPEC:MT-1]', async () => {
     const body = new TextEncoder().encode('remote body').buffer;
     const { transfer, client, calls, diskContent } = build({ remoteBody: body });
     const s = summary();
     await transfer.downloadFile(client, remote({ size: body.byteLength }), 'rid', 'etag', s);
     expect(diskContent()).toBe('remote body');
-    expect(calls.setMtime).toEqual(['note.md']);
+    expect(calls.writeMtime).toEqual([2000]);
     expect(s.downloadedCount).toBe(1);
     expect(calls.history).toEqual(['downloaded:note.md']);
     expect(calls.setFile[0]).toMatchObject({ remoteId: 'rid', idType: 'etag', isConflicted: false });
@@ -271,10 +270,11 @@ describe('TransferService.downloadFile', () => {
     expect(calls.wrote).toEqual(['note.md']);
   });
 
-  it('does not stamp an mtime the server did not give', async () => {
+  it('does not stamp an mtime the server did not give [SPEC:MT-3]', async () => {
     const body = new TextEncoder().encode('b').buffer;
     const { transfer, client, calls } = build({ remoteBody: body });
     await transfer.downloadFile(client, remote({ size: 1, lastModified: 0 }), 'rid', 'etag', summary());
-    expect(calls.setMtime).toEqual([]);
+    expect(calls.writeMtime).toEqual([undefined]);
+    expect(calls.writeMtime[0]).toBeUndefined();
   });
 });
