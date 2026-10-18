@@ -1010,10 +1010,10 @@ export class SyncEngine {
 
   private resolveByWrite(
     path: string, content: string, clean: boolean, remote: RemoteFileInfo,
-    remoteId: string, idType: FileState['idType'], localMtimeBefore: number, summary: SyncSessionSummary,
+    remoteId: string, idType: FileState['idType'], summary: SyncSessionSummary,
   ): Promise<void> {
     return this.conflicts.resolveByWrite(
-      this.currentConnection(), path, content, clean, remote, remoteId, idType, localMtimeBefore, summary,
+      this.currentConnection(), path, content, clean, remote, remoteId, idType, summary,
     );
   }
 
@@ -1249,15 +1249,12 @@ export class SyncEngine {
       false,
     );
 
-    // Identical on both sides: seed State with no transfer, and apply the remote mtime locally.
+    // Identical on both sides: seed State with no transfer and no local write (the local mtime is left unchanged).
     for (const path of plan.unchanged) {
       const lf = localFiles.get(path);
       const remote = remoteMap.get(path);
       if (!lf || !remote) continue;
       const mtime = remote.lastModified || lf.mtime;
-      if (remote.lastModified) {
-        await this.opts.localAdapter.setMtime(path, remote.lastModified);
-      }
       // Classified unchanged only after localHash === remote.checksum, so the checksum is the content hash for both sides.
       this.opts.stateDB.setFile(await this.withLocalSignature({
         path, localHash: remote.checksum!, remoteId: remote.checksum!, idType: 'sha256',

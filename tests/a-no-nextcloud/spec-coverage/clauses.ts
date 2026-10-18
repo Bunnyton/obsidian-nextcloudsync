@@ -737,4 +737,11 @@ export const CLAUSES: Clause[] = [
   { id: 'NQT-6', source: 'specs/099-quiet-mobile-sync-toast FR-009 (silence never leaks into the next sync: automatic then manual, automatic then automatic; at most one live toast at a time)', layer: 'a' },
   { id: 'NQT-7', source: 'specs/099-quiet-mobile-sync-toast D3 (syncManual() with no argument passes automatic: true to setStatus, syncManual({ manual: true }) passes automatic: false)', layer: 'a' },
   { id: 'NQT-8', source: 'specs/099-quiet-mobile-sync-toast FR-007/D4 (a watch-triggered sync start passes automatic: true to setStatus, so no Syncing toast is created)', layer: 'a' },
+  // MT: modification time of written files (docs/spec.md §9.6).
+  { id: 'MT-1', source: 'docs/spec.md §9.6 (a written remote body gets the remote lastModified as its local mtime through the write options of atomicWrite/atomicWriteBinary)', layer: 'a' },
+  { id: 'MT-2', source: 'docs/spec.md §9.6 (a write to a file open in a leaf passes the same mtime to Vault.modify/modifyBinary)', layer: 'a' },
+  { id: 'MT-3', source: 'docs/spec.md §9.6 (without a remote lastModified the write passes no mtime, so the file gets the write time)', layer: 'a' },
+  { id: 'MT-4', source: 'docs/spec.md §9.6 (a merge or conflict-marker write takes one merge time for the local write, the upload X-OC-MTime and the state mtime)', layer: 'a' },
+  { id: 'MT-5', source: 'docs/spec.md §9.6 (a forced clean-side apply writes the local file with the same apply time it uploads)', layer: 'a' },
+  { id: 'MT-6', source: 'docs/spec.md §9.6 (a path that writes no content leaves the local mtime unchanged)', layer: 'a' },
 ];

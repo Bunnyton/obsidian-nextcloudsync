@@ -237,3 +237,80 @@ describe('[SPEC:OL-3] not-open file (or no workspace injected) -> existing tmp-w
     expect((files.get(path) as ArrayBuffer).byteLength).toBe(4);
   });
 });
+
+describe('[SPEC:MT-2] open file -> the requested mtime is passed to vault.modify/modifyBinary', () => {
+  const T = Date.UTC(2020, 0, 1);
+  type Opts = { mtime?: number } | undefined;
+
+  it('atomicWrite(p, text, T) passes { mtime: T } as the third argument of vault.modify', async () => {
+    const path = 'Notes/open.md';
+    const file = makeTFile(path);
+    const { adapter } = makeAdapter();
+    const { vault, modify } = makeVault(file);
+    const local = new LocalAdapter(adapter, vault, makeWorkspace(path, file));
+
+    await local.atomicWrite(path, 'remote content', T);
+
+    expect((modify.mock.calls[0] as unknown[])[2] as Opts).toEqual({ mtime: T });
+    expect(adapter.write).not.toHaveBeenCalled();
+  });
+
+  it('atomicWriteBinary(p, data, T) passes { mtime: T } as the third argument of vault.modifyBinary', async () => {
+    const path = 'attachments/open.png';
+    const file = makeTFile(path);
+    const { adapter } = makeAdapter();
+    const { vault, modifyBinary } = makeVault(file);
+    const local = new LocalAdapter(adapter, vault, makeWorkspace(path, file));
+
+    await local.atomicWriteBinary(path, new ArrayBuffer(4), T);
+
+    expect((modifyBinary.mock.calls[0] as unknown[])[2] as Opts).toEqual({ mtime: T });
+    expect(adapter.writeBinary).not.toHaveBeenCalled();
+  });
+
+  it('a deferred (background) leaf also receives the mtime', async () => {
+    const path = 'Notes/deferred.md';
+    const file = makeTFile(path);
+    const { adapter } = makeAdapter();
+    const { vault, modify } = makeVault(file);
+    const local = new LocalAdapter(adapter, vault, makeDeferredWorkspace(path));
+
+    await local.atomicWrite(path, 'remote content', T);
+
+    expect((modify.mock.calls[0] as unknown[])[2] as Opts).toEqual({ mtime: T });
+  });
+
+  it.each([
+    ['omitted', undefined],
+    ['zero', 0],
+  ])('text write with mtime %s passes no mtime to vault.modify', async (_label, mtime) => {
+    const path = 'Notes/open.md';
+    const file = makeTFile(path);
+    const { adapter } = makeAdapter();
+    const { vault, modify } = makeVault(file);
+    const local = new LocalAdapter(adapter, vault, makeWorkspace(path, file));
+
+    if (mtime === undefined) await local.atomicWrite(path, 'remote content');
+    else await local.atomicWrite(path, 'remote content', mtime);
+
+    const opts = (modify.mock.calls[0] as unknown[])[2] as Opts;
+    expect(opts?.mtime).toBeUndefined();
+  });
+
+  it.each([
+    ['omitted', undefined],
+    ['zero', 0],
+  ])('binary write with mtime %s passes no mtime to vault.modifyBinary', async (_label, mtime) => {
+    const path = 'attachments/open.png';
+    const file = makeTFile(path);
+    const { adapter } = makeAdapter();
+    const { vault, modifyBinary } = makeVault(file);
+    const local = new LocalAdapter(adapter, vault, makeWorkspace(path, file));
+
+    if (mtime === undefined) await local.atomicWriteBinary(path, new ArrayBuffer(4));
+    else await local.atomicWriteBinary(path, new ArrayBuffer(4), mtime);
+
+    const opts = (modifyBinary.mock.calls[0] as unknown[])[2] as Opts;
+    expect(opts?.mtime).toBeUndefined();
+  });
+});

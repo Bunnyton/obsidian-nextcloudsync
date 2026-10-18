@@ -43,12 +43,11 @@ async function buildHarness(o: HarnessOpts) {
 
   const atomicWrite = jest.fn(async (_p: string, _d: string) => undefined);
   const atomicWriteBinary = jest.fn(async (_p: string, _d: ArrayBuffer) => undefined);
-  const setMtime = jest.fn(async () => undefined);
   const localAdapter = {
     stat: jest.fn(async () => ({ size: enc.encode(o.local).byteLength, mtime: 1000 })),
     read: jest.fn(async () => o.local),
     readBinary: jest.fn(async () => toBuf(o.local)),
-    atomicWrite, atomicWriteBinary, setMtime,
+    atomicWrite, atomicWriteBinary,
   };
   const setFile = jest.fn();
   const stateDB = {

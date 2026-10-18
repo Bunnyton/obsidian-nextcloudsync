@@ -19,7 +19,7 @@ import { remoteIdOf } from '../remoteIdentity';
 import { bytesEqual } from '../identity/contentIdentity';
 
 export interface TransferDeps {
-  localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary' | 'atomicWriteBinary' | 'setMtime'>;
+  localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary' | 'atomicWriteBinary'>;
   stateDB: Pick<StateDB, 'getFile' | 'setFile'>;
   journal: SyncJournal;
   mergeBase: MergeBaseRecorder;
@@ -148,12 +148,8 @@ export class TransferService {
       void this.deps.logger?.log(`download: body identical to the local file → state converged, no write → ${remote.path}`);
       return;
     }
-    await this.deps.localAdapter.atomicWriteBinary(remote.path, data);
+    await this.deps.localAdapter.atomicWriteBinary(remote.path, data, remote.lastModified || undefined);
     summary.downloadedCount++;
-
-    if (remote.lastModified) {
-      await this.deps.localAdapter.setMtime(remote.path, remote.lastModified);
-    }
 
     const localHash = await sha256(data);
     this.deps.journal.recordHistory(remote.path, 'downloaded', undefined, {

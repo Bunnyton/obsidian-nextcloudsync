@@ -1,5 +1,5 @@
-// Direct tests for ResolutionService; no [SPEC:...] tags (CSS-*, UBC-* and the compare clauses stay with
-// the engine-level suites). Written from the user's side: compare never mutates anything, push and pull
+// Direct tests for ResolutionService; only the MT-* write-time clauses are tagged here (CSS-*, UBC-* and the
+// compare clauses stay with the engine-level suites). Written from the user's side: compare never mutates anything, push and pull
 // reject rather than half-succeed, and a clean-side snapshot is dropped once served (it holds two full
 // copies of a note, so leaking it is a storage leak).
 import { ResolutionService, ResolutionDeps } from '../../../../src/sync/resolution/ResolutionService';
@@ -36,7 +36,6 @@ function build(o: Opts = {}, over: Partial<ResolutionDeps> = {}) {
 
   const calls = {
     wroteBinary: [] as string[],
-    setMtime: [] as string[],
     setFile: [] as FileState[],
     history: [] as string[],
     mergeBase: [] as string[],
@@ -45,6 +44,8 @@ function build(o: Opts = {}, over: Partial<ResolutionDeps> = {}) {
     snapWrites: [] as string[],
     snapDeletes: [] as string[],
     uploads: [] as string[],
+    writeMtimes: [] as Array<number | undefined>,
+    uploadMtimes: [] as Array<number | undefined>,
   };
 
   const client = {
@@ -56,8 +57,9 @@ function build(o: Opts = {}, over: Partial<ResolutionDeps> = {}) {
   } as unknown as IWebDAVClient;
 
   const uploadStrategy = {
-    upload: async (_c: unknown, p: string) => {
+    upload: async (_c: unknown, p: string, _d: unknown, mtime?: number) => {
       calls.uploads.push(p);
+      calls.uploadMtimes.push(mtime);
       if (o.upload === 'throw') throw new Error('PUT failed');
       return o.upload === 'skipped' ? 'skipped' : 'uploaded';
     },
@@ -67,10 +69,9 @@ function build(o: Opts = {}, over: Partial<ResolutionDeps> = {}) {
     localAdapter: {
       stat: async () => (onDisk == null ? null : { size: onDisk.length, mtime: 1000 }),
       readBinary: async () => new TextEncoder().encode(onDisk ?? '').buffer,
-      atomicWriteBinary: async (p: string, d: ArrayBuffer) => {
-        calls.wroteBinary.push(p); onDisk = new TextDecoder().decode(d);
+      atomicWriteBinary: async (p: string, d: ArrayBuffer, mtime?: number) => {
+        calls.wroteBinary.push(p); calls.writeMtimes.push(mtime); onDisk = new TextDecoder().decode(d);
       },
-      setMtime: async (p: string) => { calls.setMtime.push(p); },
     } as unknown as ResolutionDeps['localAdapter'],
     stateDB: {
       getFile: (p: string) => (o.conflicted?.includes(p) ? { isConflicted: true } as FileState : undefined),
@@ -213,9 +214,25 @@ describe('ResolutionService — force resolution by push / pull', () => {
     const { service, client, calls, diskContent } = build({ localContent: 'old', remoteBody: 'remote body' });
     await service.pullRemoteToLocal(client, 'note.md');
     expect(diskContent()).toBe('remote body');
-    expect(calls.setMtime).toEqual(['note.md']);
     expect(calls.history).toEqual(['downloaded:note.md']);
     expect(calls.setFile[0]).toMatchObject({ isConflicted: false });
+  });
+
+  it('pull: writes the body with the remote lastModified as its mtime [SPEC:MT-1]', async () => {
+    const { service, client, calls } = build({
+      localContent: 'old', remoteInfos: [remote({ lastModified: 1234567 })],
+    });
+    await service.pullRemoteToLocal(client, 'note.md');
+    expect(calls.writeMtimes).toEqual([1234567]);
+  });
+
+  it('pull: passes no mtime when the remote has no lastModified', async () => {
+    const { service, client, calls } = build({
+      localContent: 'old', remoteInfos: [remote({ lastModified: 0 })],
+    });
+    await service.pullRemoteToLocal(client, 'note.md');
+    expect(calls.writeMtimes).toHaveLength(1);
+    expect(calls.writeMtimes[0]).toBeUndefined();
   });
 
   it('pull: rejects when the remote has no such file', async () => {
@@ -288,6 +305,22 @@ describe('ResolutionService — clean-side snapshots', () => {
     expect(calls.mergeBase).toEqual(['note.md']);
     expect(snaps.has('note.md')).toBe(false);
     expect(calls.setFile[0].isConflicted).toBe(false);
+  });
+
+  it('applyCleanLocal: writes locally with the same mtime it uploads [SPEC:MT-5]', async () => {
+    const { service, conn, calls } = build({ snapshots: { 'note.md': snap() } });
+    await service.applyCleanLocal(conn, 'note.md');
+    expect(calls.uploadMtimes).toHaveLength(1);
+    expect(typeof calls.uploadMtimes[0]).toBe('number');
+    expect(calls.writeMtimes).toEqual(calls.uploadMtimes);
+  });
+
+  it('applyCleanRemote: writes locally with the same mtime it uploads [SPEC:MT-5]', async () => {
+    const { service, conn, calls } = build({ snapshots: { 'note.md': snap() } });
+    await service.applyCleanRemote(conn, 'note.md');
+    expect(calls.uploadMtimes).toHaveLength(1);
+    expect(typeof calls.uploadMtimes[0]).toBe('number');
+    expect(calls.writeMtimes).toEqual(calls.uploadMtimes);
   });
 
   it('applyCleanRemote: writes the captured remote side to both sides', async () => {

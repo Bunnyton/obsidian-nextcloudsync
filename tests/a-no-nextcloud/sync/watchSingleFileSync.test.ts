@@ -46,7 +46,6 @@ function makeLocalAdapter(files: Record<string, string>, mtimes: Record<string, 
     atomicWrite: jest.fn(async (p: string, d: string) => { files[p] = d; }),
     atomicWriteBinary: jest.fn(async (p: string, d: ArrayBuffer) => { files[p] = dec.decode(d); }),
     writeBinary: jest.fn(async (p: string, d: ArrayBuffer) => { files[p] = dec.decode(d); }),
-    setMtime: jest.fn(),
     remove: jest.fn(async (p: string) => { delete files[p]; }),
   };
 }
@@ -73,7 +72,6 @@ function makeRacyLocalAdapter(path: string, tempBody: string, finalBody: string,
     atomicWrite: jest.fn(async (p: string, d: string) => { files[p] = d; }),
     atomicWriteBinary: jest.fn(async (p: string, d: ArrayBuffer) => { files[p] = dec.decode(d); }),
     writeBinary: jest.fn(async (p: string, d: ArrayBuffer) => { files[p] = dec.decode(d); }),
-    setMtime: jest.fn(),
     remove: jest.fn(async (p: string) => { delete files[p]; }),
   };
 }

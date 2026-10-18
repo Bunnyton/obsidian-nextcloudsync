@@ -1,4 +1,5 @@
-import { DataAdapter, FileView, Notice, Platform, TFile, Vault, Workspace, normalizePath } from 'obsidian';
+import type { DataWriteOptions } from 'obsidian';
+import { DataAdapter, FileView, Notice, TFile, Vault, Workspace, normalizePath } from 'obsidian';
 
 export interface LocalFileEntry { path: string; size: number; mtime: number; }
 
@@ -9,6 +10,12 @@ const TMP_SUFFIX = '.ncs.tmp';
 const LEGACY_TMP_SUFFIX = '.nextcloudsync.tmp';
 const NAME_MAX_BYTES = 255;
 const IGNORE_TIMEOUT_MS = 5000;
+
+// Trailing write-options argument carrying the file's modification time (docs/spec.md §9.6). Without a positive mtime
+// the argument is omitted, not passed as undefined, so the API applies its default (the write time).
+function writeOptionsArgs(mtime: number | undefined): [] | [DataWriteOptions] {
+  return mtime !== undefined && mtime > 0 ? [{ mtime }] : [];
+}
 
 // NAME_MAX is measured in bytes, not UTF-16 code units.
 function utf8ByteLength(s: string): number {
@@ -121,12 +128,12 @@ export class LocalAdapter {
 
   // An open leaf is updated in place via Vault.modify (no delete event, so Obsidian never detaches it, issue #15);
   // otherwise tmp-write -> remove existing -> rename.
-  async atomicWrite(targetPath: string, content: string): Promise<void> {
+  async atomicWrite(targetPath: string, content: string, mtime?: number): Promise<void> {
     targetPath = normalizePath(targetPath);
     const openFile = this.findOpenTFile(targetPath);
     if (openFile) {
       this.ignore(targetPath);
-      await this.vault!.modify(openFile, content);
+      await this.vault!.modify(openFile, content, ...writeOptionsArgs(mtime));
       return;
     }
     const tmpPath = tmpPathFor(targetPath);
@@ -135,7 +142,7 @@ export class LocalAdapter {
     let targetRemoved = false;
     try {
       await this.ensureParentDir(targetPath);
-      await this.adapter.write(tmpPath, content);
+      await this.adapter.write(tmpPath, content, ...writeOptionsArgs(mtime));
       if (await this.adapter.exists(targetPath)) {
         await this.adapter.remove(targetPath);
         targetRemoved = true;
@@ -152,12 +159,12 @@ export class LocalAdapter {
   }
 
   // Same open-file in-place path as atomicWrite (Vault.modifyBinary); otherwise tmp-write -> remove -> rename with read-back verification.
-  async atomicWriteBinary(targetPath: string, data: ArrayBuffer): Promise<void> {
+  async atomicWriteBinary(targetPath: string, data: ArrayBuffer, mtime?: number): Promise<void> {
     targetPath = normalizePath(targetPath);
     const openFile = this.findOpenTFile(targetPath);
     if (openFile) {
       this.ignore(targetPath);
-      await this.vault!.modifyBinary(openFile, data);
+      await this.vault!.modifyBinary(openFile, data, ...writeOptionsArgs(mtime));
       return;
     }
     const tmpPath = tmpPathFor(targetPath);
@@ -166,7 +173,7 @@ export class LocalAdapter {
     let targetRemoved = false;
     try {
       await this.ensureParentDir(targetPath);
-      await this.adapter.writeBinary(tmpPath, data);
+      await this.adapter.writeBinary(tmpPath, data, ...writeOptionsArgs(mtime));
       if (await this.adapter.exists(targetPath)) {
         await this.adapter.remove(targetPath);
         targetRemoved = true;
@@ -206,21 +213,6 @@ export class LocalAdapter {
 
   async list(path: string): Promise<{ files: string[]; folders: string[] }> {
     return this.adapter.list(normalizePath(path));
-  }
-
-  async setMtime(path: string, mtime: number): Promise<void> {
-    // Node's fs is desktop-only; on mobile this is a no-op because change detection is hash-based.
-    if (!Platform.isDesktopApp) return;
-    try {
-      const nodefs = (window as Window & { require?: (m: string) => { utimes: (p: string, a: number, m: number, cb: (e: Error | null) => void) => void } }).require?.('fs');
-      const getFullPath = (this.adapter as unknown as { getFullPath?: (p: string) => string }).getFullPath?.bind(this.adapter);
-      if (!nodefs || !getFullPath) return;
-      const fullPath = getFullPath(normalizePath(path));
-      const sec = mtime / 1000;
-      await new Promise<void>((resolve, reject) =>
-        nodefs.utimes(fullPath, sec, sec, (err) => (err ? reject(err) : resolve())),
-      );
-    } catch { /* best-effort: silently ignore on mobile or unsupported environments */ }
   }
 
   // Tmp files only: never call remove on user files.
