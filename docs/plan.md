@@ -194,9 +194,16 @@ The `SyncEngine` methods below delegate to extracted services (see §17); the be
 - **`uploadFile()`** (`TransferService.uploadFile()`) — stat → readBinary → `acquireLock()` (when Files Locking is in use) →
   `uploadStrategy.upload(client, path, data, mtime, {ifMatchEtag})` → `releaseLock()` →
   `setFile(withLocalSignature(...))` → history `uploaded`. `FileLockedError` (423) ⇒ retry queue.
-- **`downloadFile()`** (`TransferService.downloadFile()`) — `client.downloadFile()` → `atomicWriteBinary()` → `setMtime(remote)` →
+- **`downloadFile()`** (`TransferService.downloadFile()`) — `client.downloadFile()` → `atomicWriteBinary(path, data, remote.lastModified)` →
   `sha256` → `setFile(withLocalSignature(...))`. **A fetched body that equals the local file is not written**: the state is recorded as
-  converged, and there is no write, no `setMtime` (the mtime stays, so no vault event fires), no history entry and no download count.
+  converged, and there is no write (the mtime stays, so no vault event fires), no history entry and no download count.
+- **Modification time of a write** (docs/spec.md §9.6) — `LocalAdapter.atomicWrite()` / `atomicWriteBinary()` take an optional `mtime` and pass it
+  as Obsidian's `DataWriteOptions.mtime` to the same write call (`adapter.write`/`writeBinary` on the tmp file, or `Vault.modify`/`modifyBinary`
+  for a file open in a leaf). There is no separate mtime step and no platform branch, so desktop and mobile take one path. Without a
+  positive `mtime` the argument is omitted and the file gets the write time. The state database records the real post-write stat.
+  That the platform honours the option (adapter stat and vault cache, after the tmp-write rename and after `modifyBinary`) is checked
+  on real Obsidian by `tests/b2-nextcloud-ui/scenarios/writeMtimeContract.b2.test.ts` (desktop) and
+  `tests/b3-android-ui/scenarios/writeMtimeContract.b3.test.ts` (Android).
 - **Local deletion** `applyLocalDeletion()` (`DeletionService.applyLocalDeletion()`) — confirmed with the server checksum. Baseline match ⇒ delete the remote
   (to the trash); divergence ⇒ **restore** to local (the remote edit is not lost); no checksum ⇒ skip (the safe side).
 - **Remote deletion** `processRemoteDeletion()` (`DeletionService.processRemoteDeletion()`) — **a security boundary**: `isSystemExcluded()` comes first
@@ -263,9 +270,9 @@ Action execution on the `SyncEngine` side (implemented in `ConflictApplier`):
 
 | Action | Method | Effect |
 |---|---|---|
-| `write` | `resolveByWrite()` | Writes the merged / marker content to local, applies the `max(local,remote)` mtime, and **pushes the merge result to the server** to converge. History is `merged` (clean) / `conflicted` (markers) |
+| `write` | `resolveByWrite()` | Takes one merge time (`Date.now()`), writes the merged / marker content to local with it as the mtime, and **pushes the merge result to the server** with the same time as `X-OC-MTime` to converge; the state mtime is the same value. History is `merged` (clean) / `conflicted` (markers) |
 | `prefer-local` | `resolveByPreferLocal()` | Overwrites the remote with local. If the upload fails, the conflict is kept and a retry is queued |
-| `prefer-remote` | `resolveByPreferRemote()` | Overwrites local with the remote bytes and keeps the remote mtime |
+| `prefer-remote` | `resolveByPreferRemote()` | Overwrites local with the remote bytes, written with the remote mtime |
 | `safe-hold` | inline | Non-text × merge. Touches neither side and sets `isConflicted=true` (no markers, zero corruption; FR-005a). No error is counted and no retry is made |
 | `no-op` | inline | A tie (equal size/mtime). Touches neither side; not conflicted and not an error (FR-009). StateDB is unchanged, so it is re-evaluated next time |
 
@@ -691,3 +698,5 @@ Network:  WebDAVFactory / NextcloudClient (extended PROPFIND, sync-token, OCS, c
 Data:     LocalAdapter (atomic, IgnoreList) / StateDB (per device, atomic, recovery) / MergeBaseStore (per device, 3-way base) / SyncHistoryStore
 Core:     main.ts (initialisation, DI, lifecycle, command registration)
 ```
+
+**Status-bar surface (docs/spec.md §11).** `IStatusBar.setStatus(status, opts?: { automatic?: boolean })` carries whether a sync was started by the user. `SyncEngine.runSyncSession(manual)` and `WatchOperations.begin()` pass `{ automatic: true }` for syncs the user did not start; `MirrorService` and "Sync now" omit it. The optional second argument keeps existing `IStatusBar` stubs valid. `NoticeStatusBar` keeps a private `quiet` flag: `setStatus('syncing', …)` sets it from `automatic` (and creates no toast when quiet), `setProgress` clears it (the toast appears once there are transfers), and `setSyncComplete` stays silent only when quiet and there is nothing to report (no transfers, errors or unresolved conflicts). The flag is recomputed at every sync start, so it holds no state across syncs.

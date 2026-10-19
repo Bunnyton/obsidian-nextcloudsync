@@ -201,7 +201,6 @@ describe('SyncEngine.executePlan — reuses the scan (P0-C / FR-010, no double h
     const localAdapter = {
       readBinary: jest.fn(async () => new ArrayBuffer(0)),
       stat: jest.fn(async () => ({ size: 0, mtime: 1 })),
-      setMtime: jest.fn(async () => undefined),
     };
     const engine = makeEngine(localAdapter);
     const scanSpy = jest.spyOn(engine as unknown as { scanLocalFiles: () => Promise<unknown> }, 'scanLocalFiles');

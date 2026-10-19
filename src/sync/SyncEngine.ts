@@ -325,7 +325,7 @@ export class SyncEngine {
     // Set the balking flag synchronously (before any await) so a concurrent call still balks.
     this.running = true;
     this.cancelled = false;
-    const run = this.runSyncSession();
+    const run = this.runSyncSession(opts.manual === true);
     this.currentRun = run;
     try {
       await run;
@@ -340,7 +340,7 @@ export class SyncEngine {
     }
   }
 
-  private async runSyncSession(): Promise<void> {
+  private async runSyncSession(manual: boolean): Promise<void> {
     // Created before the try so catch/finally can reference them even if the first step fails.
     const summary = this.initSummary();
     this.journal.beginRun(summary.startedAt);
@@ -352,7 +352,7 @@ export class SyncEngine {
       void this.opts.logger?.log('sync: connecting (ensureClient)');
       await this.ensureClient();
       this.syncProgress = { processed: 0, total: 0 };
-      this.opts.statusBar.setStatus('syncing');
+      this.opts.statusBar.setStatus('syncing', { automatic: !manual });
 
       const isFirstSync = !this.opts.stateDB.getSyncToken() && this.opts.stateDB.getAllFiles().length === 0;
 
@@ -1010,10 +1010,10 @@ export class SyncEngine {
 
   private resolveByWrite(
     path: string, content: string, clean: boolean, remote: RemoteFileInfo,
-    remoteId: string, idType: FileState['idType'], localMtimeBefore: number, summary: SyncSessionSummary,
+    remoteId: string, idType: FileState['idType'], summary: SyncSessionSummary,
   ): Promise<void> {
     return this.conflicts.resolveByWrite(
-      this.currentConnection(), path, content, clean, remote, remoteId, idType, localMtimeBefore, summary,
+      this.currentConnection(), path, content, clean, remote, remoteId, idType, summary,
     );
   }
 
@@ -1249,15 +1249,12 @@ export class SyncEngine {
       false,
     );
 
-    // Identical on both sides: seed State with no transfer, and apply the remote mtime locally.
+    // Identical on both sides: seed State with no transfer and no local write (the local mtime is left unchanged).
     for (const path of plan.unchanged) {
       const lf = localFiles.get(path);
       const remote = remoteMap.get(path);
       if (!lf || !remote) continue;
       const mtime = remote.lastModified || lf.mtime;
-      if (remote.lastModified) {
-        await this.opts.localAdapter.setMtime(path, remote.lastModified);
-      }
       // Classified unchanged only after localHash === remote.checksum, so the checksum is the content hash for both sides.
       this.opts.stateDB.setFile(await this.withLocalSignature({
         path, localHash: remote.checksum!, remoteId: remote.checksum!, idType: 'sha256',

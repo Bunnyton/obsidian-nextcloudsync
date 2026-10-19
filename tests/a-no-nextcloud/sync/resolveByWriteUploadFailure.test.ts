@@ -6,7 +6,7 @@ import { NetworkError, RemoteFileInfo, SyncSessionSummary, FileState } from '../
 
 type ResolveByWrite = (
   path: string, content: string, clean: boolean, remote: RemoteFileInfo,
-  remoteId: string, idType: FileState['idType'], localMtimeBefore: number, summary: SyncSessionSummary,
+  remoteId: string, idType: FileState['idType'], summary: SyncSessionSummary,
 ) => Promise<void>;
 
 function initSummary(): SyncSessionSummary {
@@ -24,7 +24,6 @@ function makeEngine() {
     app: {}, settings: {},
     localAdapter: {
       atomicWrite: jest.fn(async () => undefined),
-      setMtime: jest.fn(async () => undefined),
       readBinary: jest.fn(async () => new TextEncoder().encode('merged content').buffer),
       stat: jest.fn(async () => ({ size: 14, mtime: Date.now() })),
     },
@@ -53,7 +52,7 @@ describe('[SPEC:G1-1] SyncEngine.resolveByWrite — merge upload failure must no
     const remote: RemoteFileInfo = { path: 'note.md', fileId: 'remote-file-id', checksum: null, etag: 'e1', size: 10, lastModified: Date.now() };
 
     await (engine as unknown as { resolveByWrite: ResolveByWrite }).resolveByWrite(
-      'note.md', 'merged content', /* clean */ true, remote, 'old-remote-id', 'sha256', Date.now(), summary,
+      'note.md', 'merged content', /* clean */ true, remote, 'old-remote-id', 'sha256', summary,
     );
 
     expect(setFileCalls).toHaveLength(1);
@@ -79,7 +78,7 @@ describe('[SPEC:G1-1] SyncEngine.resolveByWrite — merge upload failure must no
     const remote: RemoteFileInfo = { path: 'note.md', fileId: 'remote-file-id', checksum: null, etag: 'e1', size: 10, lastModified: Date.now() };
 
     await (engine as unknown as { resolveByWrite: ResolveByWrite }).resolveByWrite(
-      'note.md', 'merged content', /* clean */ true, remote, 'old-remote-id', 'sha256', Date.now(), summary,
+      'note.md', 'merged content', /* clean */ true, remote, 'old-remote-id', 'sha256', summary,
     );
 
     expect(setFileCalls).toHaveLength(1);
@@ -97,7 +96,7 @@ describe('[SPEC:G1-1] SyncEngine.resolveByWrite — merge upload failure must no
     const remote: RemoteFileInfo = { path: 'note.md', fileId: 'remote-file-id', checksum: null, etag: 'e1', size: 10, lastModified: Date.now() };
 
     await (engine as unknown as { resolveByWrite: ResolveByWrite }).resolveByWrite(
-      'note.md', '<<<<<<< marker content', /* clean */ false, remote, 'old-remote-id', 'sha256', Date.now(), summary,
+      'note.md', '<<<<<<< marker content', /* clean */ false, remote, 'old-remote-id', 'sha256', summary,
     );
 
     expect(setFileCalls[0].isConflicted).toBe(true);

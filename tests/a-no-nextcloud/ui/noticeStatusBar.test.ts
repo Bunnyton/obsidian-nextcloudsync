@@ -129,4 +129,115 @@ describe('NoticeStatusBar', () => {
     bar.setSyncComplete(0, 0, 1, 2); // engine passes final counts too
     expect(lastNotice().message).toBe('🔴 2 errors — ↑0 ↓0');
   });
+
+  describe('[SPEC:NQT-1] automatic sync with nothing to report creates no toast', () => {
+    it('[SPEC:NQT-1] zero uploads, downloads, conflicts and errors leaves no Notice', () => {
+      bar.setStatus('syncing', { automatic: true });
+      bar.setSyncComplete(0, 0, 0, 0);
+      expect(NoticeMock.instances).toHaveLength(0);
+    });
+  });
+
+  describe('[SPEC:NQT-2] automatic sync shows the toast once progress is reported', () => {
+    it('[SPEC:NQT-2] progress creates the toast, completion rewrites it and it dismisses after 4s', () => {
+      bar.setStatus('syncing', { automatic: true });
+      expect(NoticeMock.instances).toHaveLength(0);
+      bar.setProgress(0, 5);
+      expect(NoticeMock.instances).toHaveLength(1);
+      expect(lastNotice().message).toBe('🔄 0/5');
+      bar.setSyncComplete(2, 3, 0, 0);
+      expect(NoticeMock.instances).toHaveLength(1);
+      expect(lastNotice().message).toBe('🟢 Synced ↑2 ↓3');
+      jest.advanceTimersByTime(3999);
+      expect(lastNotice().hidden).toBe(false);
+      jest.advanceTimersByTime(1);
+      expect(lastNotice().hidden).toBe(true);
+    });
+  });
+
+  describe('[SPEC:NQT-3] automatic sync with errors or conflicts still reports', () => {
+    it('[SPEC:NQT-3] errors without transfers show the result for 10s', () => {
+      bar.setStatus('syncing', { automatic: true });
+      bar.setSyncComplete(0, 0, 0, 2);
+      expect(NoticeMock.instances).toHaveLength(1);
+      expect(lastNotice().message).toBe('🔴 2 errors — ↑0 ↓0');
+      jest.advanceTimersByTime(9999);
+      expect(lastNotice().hidden).toBe(false);
+      jest.advanceTimersByTime(1);
+      expect(lastNotice().hidden).toBe(true);
+    });
+
+    it('[SPEC:NQT-3] conflicts without transfers show the result for 10s', () => {
+      bar.setStatus('syncing', { automatic: true });
+      bar.setSyncComplete(0, 0, 1, 0);
+      expect(NoticeMock.instances).toHaveLength(1);
+      expect(lastNotice().message).toBe('🟡 1 conflict — ↑0 ↓0');
+      jest.advanceTimersByTime(9999);
+      expect(lastNotice().hidden).toBe(false);
+      jest.advanceTimersByTime(1);
+      expect(lastNotice().hidden).toBe(true);
+    });
+  });
+
+  describe('[SPEC:NQT-4] manual sync keeps the current behavior', () => {
+    it.each([
+      ['no opts', undefined],
+      ['automatic: false', { automatic: false }],
+    ])('[SPEC:NQT-4] %s shows "Syncing…" at start and "Up to date" for 4s', (_label, opts) => {
+      bar.setStatus('syncing', opts);
+      expect(NoticeMock.instances).toHaveLength(1);
+      expect(lastNotice().message).toBe('🔄 Syncing…');
+      bar.setSyncComplete(0, 0, 0, 0);
+      expect(lastNotice().message).toBe('🟢 Up to date');
+      jest.advanceTimersByTime(3999);
+      expect(lastNotice().hidden).toBe(false);
+      jest.advanceTimersByTime(1);
+      expect(lastNotice().hidden).toBe(true);
+    });
+  });
+
+  describe('[SPEC:NQT-5] a silent automatic sync leaves a visible result toast alone', () => {
+    it('[SPEC:NQT-5] neither rewrites the toast nor creates a new one', () => {
+      bar.setStatus('syncing');
+      bar.setSyncComplete(1, 0, 0, 0);
+      expect(lastNotice().message).toBe('🟢 Synced ↑1 ↓0');
+      bar.setStatus('syncing', { automatic: true });
+      bar.setSyncComplete(0, 0, 0, 0);
+      expect(NoticeMock.instances).toHaveLength(1);
+      expect(lastNotice().message).toBe('🟢 Synced ↑1 ↓0');
+      expect(lastNotice().hidden).toBe(false);
+    });
+  });
+
+  describe('[SPEC:NQT-6] quietness does not leak into the next sync', () => {
+    it('[SPEC:NQT-6] silent automatic then manual shows the manual toast', () => {
+      bar.setStatus('syncing', { automatic: true });
+      bar.setSyncComplete(0, 0, 0, 0);
+      expect(NoticeMock.instances).toHaveLength(0);
+      bar.setStatus('syncing');
+      expect(NoticeMock.instances).toHaveLength(1);
+      expect(lastNotice().message).toBe('🔄 Syncing…');
+    });
+
+    it('[SPEC:NQT-6] silent automatic then automatic with progress shows one toast', () => {
+      bar.setStatus('syncing', { automatic: true });
+      bar.setSyncComplete(0, 0, 0, 0);
+      bar.setStatus('syncing', { automatic: true });
+      bar.setProgress(0, 1);
+      expect(NoticeMock.instances).toHaveLength(1);
+      expect(lastNotice().message).toBe('🔄 0/1');
+    });
+
+    it('[SPEC:NQT-6] manual, dismissed, then silent automatic keeps at most one live toast', () => {
+      bar.setStatus('syncing');
+      bar.setSyncComplete(0, 0, 0, 0);
+      jest.advanceTimersByTime(4000);
+      expect(NoticeMock.instances).toHaveLength(1);
+      expect(lastNotice().hidden).toBe(true);
+      bar.setStatus('syncing', { automatic: true });
+      bar.setSyncComplete(0, 0, 0, 0);
+      expect(NoticeMock.instances).toHaveLength(1);
+      expect(NoticeMock.instances.filter((n) => !n.hidden)).toHaveLength(0);
+    });
+  });
 });

@@ -76,3 +76,91 @@ describe('[SPEC:G4-1] atomicWrite/atomicWriteBinary must not delete the sole sur
     expect(files.get(target)).toBe('old content');
   });
 });
+
+// Plain in-memory adapter whose rename succeeds, used to inspect the write options that reach the adapter.
+function makeWorkingAdapter() {
+  const files = new Map<string, string | ArrayBuffer>();
+  const adapter = {
+    mkdir: jest.fn(async () => undefined),
+    write: jest.fn(async (p: string, d: string) => { files.set(p, d); }),
+    writeBinary: jest.fn(async (p: string, d: ArrayBuffer) => { files.set(p, d); }),
+    exists: jest.fn(async (p: string) => files.has(p)),
+    remove: jest.fn(async (p: string) => { files.delete(p); }),
+    rename: jest.fn(async (from: string, to: string) => {
+      files.set(to, files.get(from)!);
+      files.delete(from);
+    }),
+    stat: jest.fn(async (p: string) => {
+      const v = files.get(p);
+      if (v === undefined) return null;
+      return { size: typeof v === 'string' ? v.length : v.byteLength, mtime: 0 };
+    }),
+  } as unknown as DataAdapter;
+  return { adapter, files };
+}
+
+type WriteOpts = { mtime?: number } | undefined;
+
+describe('[SPEC:MT-1] atomicWrite/atomicWriteBinary pass the requested mtime to the adapter write', () => {
+  const T = Date.UTC(2020, 0, 1);
+
+  it('atomicWriteBinary(p, data, T) passes { mtime: T } as the third argument of adapter.writeBinary', async () => {
+    const { adapter } = makeWorkingAdapter();
+    const local = new LocalAdapter(adapter);
+
+    await local.atomicWriteBinary('attachments/img.png', new ArrayBuffer(4), T);
+
+    const opts = (adapter.writeBinary as jest.Mock).mock.calls[0][2] as WriteOpts;
+    expect(opts?.mtime).toBe(T);
+  });
+
+  it('atomicWrite(p, text, T) passes { mtime: T } as the third argument of adapter.write', async () => {
+    const { adapter } = makeWorkingAdapter();
+    const local = new LocalAdapter(adapter);
+
+    await local.atomicWrite('Notes/hello.md', 'body', T);
+
+    const opts = (adapter.write as jest.Mock).mock.calls[0][2] as WriteOpts;
+    expect(opts?.mtime).toBe(T);
+  });
+
+  it.each([
+    ['omitted', undefined],
+    ['zero', 0],
+  ])('atomicWriteBinary with mtime %s passes no mtime to adapter.writeBinary', async (_label, mtime) => {
+    const { adapter } = makeWorkingAdapter();
+    const local = new LocalAdapter(adapter);
+
+    if (mtime === undefined) await local.atomicWriteBinary('attachments/img.png', new ArrayBuffer(4));
+    else await local.atomicWriteBinary('attachments/img.png', new ArrayBuffer(4), mtime);
+
+    const opts = (adapter.writeBinary as jest.Mock).mock.calls[0][2] as WriteOpts;
+    expect(opts?.mtime).toBeUndefined();
+  });
+
+  it.each([
+    ['omitted', undefined],
+    ['zero', 0],
+  ])('atomicWrite with mtime %s passes no mtime to adapter.write', async (_label, mtime) => {
+    const { adapter } = makeWorkingAdapter();
+    const local = new LocalAdapter(adapter);
+
+    if (mtime === undefined) await local.atomicWrite('Notes/hello.md', 'body');
+    else await local.atomicWrite('Notes/hello.md', 'body', mtime);
+
+    const opts = (adapter.write as jest.Mock).mock.calls[0][2] as WriteOpts;
+    expect(opts?.mtime).toBeUndefined();
+  });
+
+  it('the mtime goes to the tmp file write, before the remove -> rename swap', async () => {
+    const { adapter, files } = makeWorkingAdapter();
+    files.set('Notes/hello.md', 'old');
+    const local = new LocalAdapter(adapter);
+
+    await local.atomicWrite('Notes/hello.md', 'new', T);
+
+    const writtenPath = (adapter.write as jest.Mock).mock.calls[0][0] as string;
+    expect(writtenPath).toMatch(/\.ncs\.tmp$/);
+    expect(files.get('Notes/hello.md')).toBe('new');
+  });
+});

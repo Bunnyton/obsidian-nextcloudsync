@@ -63,7 +63,7 @@ export class ConflictApplier {
       return;
     }
 
-    // Must precede any merge write: feeds the max(local, remote) mtime stamp and the size/mtime strategies.
+    // Must precede any merge write: feeds the size/mtime strategies and the clean-side capture.
     const localStatBefore = await this.deps.localAdapter.stat(path);
     const identity = await this.convergeIfIdentical(conn, path, remote, localStatBefore);
     if (identity.converged) return;
@@ -135,7 +135,7 @@ export class ConflictApplier {
         return;
 
       case 'write':
-        await this.resolveByWrite(conn, path, decision.content, decision.clean, remote, remoteId, idType, localMtimeBefore, summary);
+        await this.resolveByWrite(conn, path, decision.content, decision.clean, remote, remoteId, idType, summary);
         return;
     }
   }
@@ -168,13 +168,12 @@ export class ConflictApplier {
   async resolveByWrite(
     conn: Connection,
     path: string, content: string, clean: boolean, remote: RemoteFileInfo,
-    remoteId: string, idType: FileState['idType'], localMtimeBefore: number, summary: SyncSessionSummary,
+    remoteId: string, idType: FileState['idType'], summary: SyncSessionSummary,
   ): Promise<void> {
-    await this.deps.localAdapter.atomicWrite(path, content);
-
-    // PROPPATCH of mtime is silently ignored on Nextcloud (live property); X-OC-MTime on upload covers the remote.
-    const maxMtime = Math.max(localMtimeBefore, remote.lastModified || 0) || Date.now();
-    await this.deps.localAdapter.setMtime(path, maxMtime);
+    // One merge time, read once: the local write, the X-OC-MTime of the upload and the stored state all use it.
+    // (PROPPATCH of mtime is silently ignored on Nextcloud, so the upload header is what sets the remote time.)
+    const mergeMtime = Date.now();
+    await this.deps.localAdapter.atomicWrite(path, content, mergeMtime);
 
     // Without this push the merge stays local-only and every later sync re-detects the same conflict.
     const mergedData = await this.deps.localAdapter.readBinary(path);
@@ -183,7 +182,7 @@ export class ConflictApplier {
     try {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
-        const outcome = await conn.uploadStrategy.upload(conn.client, path, mergedData, maxMtime);
+        const outcome = await conn.uploadStrategy.upload(conn.client, path, mergedData, mergeMtime);
         if (outcome !== 'skipped') { summary.uploadedCount++; uploaded = true; this.deps.journal.recordHistory(path, 'uploaded'); }
       } finally {
         await this.deps.transfer.releaseLock(conn.client, path, lockToken);
@@ -204,7 +203,7 @@ export class ConflictApplier {
       localHash: uploaded ? mergedHash : (prior?.localHash ?? ''),
       remoteId: uploaded ? mergedHash : remoteId,
       idType: uploaded ? 'sha256' : idType,
-      size: stat?.size ?? 0, mtime: maxMtime,
+      size: stat?.size ?? 0, mtime: mergeMtime,
       remoteFileId: remote.fileId,
       // Stays true after a failed upload even for a clean merge, or the next sync reads the state as converged.
       isConflicted: !clean || !uploaded,
@@ -287,10 +286,7 @@ export class ConflictApplier {
       return;
     }
     try {
-      await this.deps.localAdapter.atomicWriteBinary(path, remoteData);
-      if (remote.lastModified) {
-        await this.deps.localAdapter.setMtime(path, remote.lastModified);
-      }
+      await this.deps.localAdapter.atomicWriteBinary(path, remoteData, remote.lastModified || undefined);
     } catch (err) {
       this.deps.journal.recordError(summary, path, err);
       this.deps.queueRetry(path);

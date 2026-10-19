@@ -59,7 +59,7 @@ beforeEach(() => { notices().length = 0; });
 describe('[SPEC:DSG-1] sync download skips an oversized remote before the GET', () => {
   it('does not fetch, does not write, does not advance Base, no retry, no error', async () => {
     const atomicWriteBinary = jest.fn();
-    const { engine, stateDB } = await buildEngine(20, { atomicWriteBinary, setMtime: jest.fn(), stat: jest.fn() });
+    const { engine, stateDB } = await buildEngine(20, { atomicWriteBinary, stat: jest.fn() });
     const base: FileState = { path: 'big.bin', localHash: 'h', remoteId: 'e-old', idType: 'etag', size: 1, mtime: 1, remoteFileId: 'f', isConflicted: false };
     stateDB.setFile(base);
     const client = { downloadFile: jest.fn(async () => buf(0)) };
@@ -81,7 +81,7 @@ describe('[SPEC:DSG-1] sync download skips an oversized remote before the GET', 
 
 describe('[SPEC:DSG-2] delete-vs-edit restore routes through the same guard', () => {
   it('does not fetch the oversized remote when restoring a remotely-edited deleted file', async () => {
-    const { engine, stateDB } = await buildEngine(20, { atomicWriteBinary: jest.fn(), setMtime: jest.fn(), stat: jest.fn() });
+    const { engine, stateDB } = await buildEngine(20, { atomicWriteBinary: jest.fn(), stat: jest.fn() });
     // serverHash (remote.checksum) differs from base.localHash → restore branch → downloadFile().
     const base: FileState = { path: 'big.bin', localHash: 'orig', remoteId: 'r', idType: 'sha256', size: 1, mtime: 1, remoteFileId: 'f', isConflicted: false };
     stateDB.setFile(base);
@@ -156,7 +156,7 @@ describe('[SPEC:DSG-6] maxFileSizeMB = 0 is unlimited (desktop default, FR-008)'
   it('downloads regardless of size', async () => {
     const atomicWriteBinary = jest.fn(async () => undefined);
     const { engine } = await buildEngine(0, {
-      atomicWriteBinary, setMtime: jest.fn(async () => undefined),
+      atomicWriteBinary,
       stat: jest.fn(async () => ({ size: 10, mtime: 0 })),
     });
     const client = { downloadFile: jest.fn(async () => buf(10)) };
@@ -175,7 +175,7 @@ describe('[SPEC:DSG-7] size exactly at the cap is allowed (boundary)', () => {
   it('downloads when remote.size === cap (not over)', async () => {
     const atomicWriteBinary = jest.fn(async () => undefined);
     const { engine } = await buildEngine(20, {
-      atomicWriteBinary, setMtime: jest.fn(async () => undefined),
+      atomicWriteBinary,
       stat: jest.fn(async () => ({ size: 10, mtime: 0 })),
     });
     const client = { downloadFile: jest.fn(async () => buf(10)) };
@@ -198,7 +198,7 @@ describe('[SPEC:DSG-8] self-healing: raising the cap downloads the once-skipped 
     const engine = new SyncEngine({
       app: {}, settings,
       localAdapter: {
-        atomicWriteBinary, setMtime: jest.fn(async () => undefined), stat: jest.fn(async () => ({ size: 10, mtime: 0 })),
+        atomicWriteBinary, stat: jest.fn(async () => ({ size: 10, mtime: 0 })),
         // Other bytes on disk, so the download really writes (docs/spec.md §5.3a).
         readBinary: jest.fn(async () => new ArrayBuffer(0)),
       },

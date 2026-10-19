@@ -159,7 +159,8 @@ export interface FileState {
   isConflicted: boolean;
   /**
    * Local mtime re-statted right after the plugin's own write/download: the change-detection fast-path
-   * key on mobile, where `setMtime()` is a no-op. Absent in older state files, which cost one
+   * key. A downloaded mtime is requested at write time via `DataWriteOptions.mtime`; this records the
+   * real post-write stat. Absent in older state files, which cost one
    * reconciling hash (docs/spec.md §4.2).
    */
   localMtime?: number;

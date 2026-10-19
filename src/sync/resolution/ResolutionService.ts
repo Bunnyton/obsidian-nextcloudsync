@@ -31,7 +31,7 @@ export interface Connection {
 }
 
 export interface ResolutionDeps {
-  localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary' | 'atomicWriteBinary' | 'setMtime'>;
+  localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary' | 'atomicWriteBinary'>;
   stateDB: Pick<StateDB, 'getFile' | 'setFile' | 'save' | 'countConflicted'>;
   historyStore?: Pick<SyncHistoryStore, 'save'>;
   cleanSideStore?: Pick<CleanSideStore, 'get' | 'set' | 'delete' | 'paths' | 'requestSave'>;
@@ -168,8 +168,7 @@ export class ResolutionService {
     }
 
     const remoteData = await client.downloadFile(path);
-    await this.deps.localAdapter.atomicWriteBinary(path, remoteData);
-    if (remote.lastModified) await this.deps.localAdapter.setMtime(path, remote.lastModified);
+    await this.deps.localAdapter.atomicWriteBinary(path, remoteData, remote.lastModified || undefined);
 
     const localHash = await sha256(remoteData);
     const remoteId = remote.checksum ?? localHash;
@@ -255,8 +254,7 @@ export class ResolutionService {
       await this.deps.transfer.releaseLock(conn.client, path, lockToken);
     }
 
-    await this.deps.localAdapter.atomicWriteBinary(path, data);
-    await this.deps.localAdapter.setMtime(path, mtime);
+    await this.deps.localAdapter.atomicWriteBinary(path, data, mtime);
 
     const localHash = await sha256(data);
     this.deps.journal.recordHistory(path, 'uploaded', undefined, {

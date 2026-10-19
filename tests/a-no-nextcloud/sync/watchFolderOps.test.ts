@@ -65,7 +65,7 @@ describe('[SPEC:WF-1] SyncEngine.createSingleFolder', () => {
   it('shows status-bar activity while propagating', async () => {
     const { engine, statusBar } = makeEngine();
     await engine.createSingleFolder('New');
-    expect(statusBar.setStatus).toHaveBeenCalledWith('syncing');
+    expect(statusBar.setStatus).toHaveBeenCalledWith('syncing', { automatic: true });
     expect(statusBar.setStatus).toHaveBeenLastCalledWith('idle');
   });
 });

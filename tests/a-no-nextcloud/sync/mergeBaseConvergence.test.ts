@@ -65,7 +65,7 @@ describe('[SPEC:MB-5] download records base (Auto Merge File text)', () => {
   it('stores the downloaded body as base for a .md file', async () => {
     // The local file holds different bytes of the same length, so the download really writes (docs/spec.md §5.3a).
     const localAdapter = {
-      atomicWriteBinary: jest.fn(), setMtime: jest.fn(), stat: jest.fn(async () => ({ size: 5, mtime: 0 })),
+      atomicWriteBinary: jest.fn(), stat: jest.fn(async () => ({ size: 5, mtime: 0 })),
       readBinary: jest.fn(async () => toBuf('older')),
     };
     const client = { downloadFile: jest.fn(async () => toBuf('hello')) };
@@ -78,7 +78,7 @@ describe('[SPEC:MB-5] download records base (Auto Merge File text)', () => {
 describe('[SPEC:MB-11] download does NOT record base for non-Auto-Merge files', () => {
   it('skips base for a .bin file', async () => {
     const localAdapter = {
-      atomicWriteBinary: jest.fn(), setMtime: jest.fn(), stat: jest.fn(async () => ({ size: 3, mtime: 0 })),
+      atomicWriteBinary: jest.fn(), stat: jest.fn(async () => ({ size: 3, mtime: 0 })),
       readBinary: jest.fn(async () => toBuf('old')),
     };
     const client = { downloadFile: jest.fn(async () => toBuf('bin')) };
@@ -113,7 +113,7 @@ describe('[SPEC:MB-8] prefer-local / prefer-remote record base', () => {
   });
 
   it('prefer-remote stores the remote body', async () => {
-    const localAdapter = { atomicWriteBinary: jest.fn(), setMtime: jest.fn(), stat: jest.fn(async () => ({ size: 4, mtime: 0 })) };
+    const localAdapter = { atomicWriteBinary: jest.fn(), stat: jest.fn(async () => ({ size: 4, mtime: 0 })) };
     const { engine, baseStore } = await buildEngine(localAdapter, {});
     await (engine as unknown as { resolveByPreferRemote: (p: string, r: RemoteFileInfo, d: ArrayBuffer, id: string, t: string, s: SyncSessionSummary) => Promise<void> })
       .resolveByPreferRemote('note.md', remoteOf('note.md', 4), toBuf('REMT'), 'e', 'etag', makeSummary());
@@ -125,14 +125,13 @@ describe('[SPEC:MB-7] clean merge records base; markers do not', () => {
   function mergeAdapter(body: string) {
     return {
       atomicWrite: jest.fn(async () => undefined),
-      setMtime: jest.fn(async () => undefined),
       readBinary: jest.fn(async () => toBuf(body)),
       stat: jest.fn(async () => ({ size: body.length, mtime: 0 })),
     };
   }
   const callWrite = (e: SyncEngine, content: string, clean: boolean) =>
-    (e as unknown as { resolveByWrite: (p: string, c: string, cl: boolean, r: RemoteFileInfo, id: string, t: string, m: number, s: SyncSessionSummary) => Promise<void> })
-      .resolveByWrite('note.md', content, clean, remoteOf('note.md', content.length), 'e', 'etag', 0, makeSummary());
+    (e as unknown as { resolveByWrite: (p: string, c: string, cl: boolean, r: RemoteFileInfo, id: string, t: string, s: SyncSessionSummary) => Promise<void> })
+      .resolveByWrite('note.md', content, clean, remoteOf('note.md', content.length), 'e', 'etag', makeSummary());
 
   it('clean merge that reaches the server records the merged body as base', async () => {
     const { engine, baseStore } = await buildEngine(mergeAdapter('MERGED'), {});

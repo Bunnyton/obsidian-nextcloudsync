@@ -111,7 +111,6 @@ describe('SyncEngine.handleConflict — strategy actions (feature 037)', () => {
     const setFile = jest.fn();
     const atomicWrite = jest.fn(async () => undefined);
     const atomicWriteBinary = jest.fn(async () => undefined);
-    const setMtime = jest.fn(async () => undefined);
     const upload = jest.fn(async () => 'uploaded' as const);
 
     const localAdapter = {
@@ -120,7 +119,6 @@ describe('SyncEngine.handleConflict — strategy actions (feature 037)', () => {
       readBinary: jest.fn(async () => toBuf(localContent)),
       atomicWrite,
       atomicWriteBinary,
-      setMtime,
     };
     const setRemoteRootEtag = jest.fn();
     const stateDB = { setFile, getFile: jest.fn(() => undefined), setRemoteRootEtag };
