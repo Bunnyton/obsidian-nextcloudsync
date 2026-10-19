@@ -11,6 +11,13 @@ and folded into the next stable entry.
 
 > A Japanese translation is available at [`CHANGELOG.ja.md`](CHANGELOG.ja.md).
 
+## [1.0.12] - 2026-10-19
+
+### Changed
+- **Downloaded files keep the server's modification time on every device.** A file downloaded from Nextcloud now gets the same modification time as on the server, on mobile as well as on desktop, so "sort by modified time" shows the same order on every device. A merged note (automatic merge, conflict markers, or a resolved conflict) gets the time of the merge, on your device and on the server. A sync that writes no content leaves the time unchanged. There is no new setting.
+- **Quieter automatic syncs on mobile.** A sync that you did not start (startup, returning to the app, periodic, or sync-on-edit) no longer shows a toast when nothing was transferred and there are no errors or conflicts, so reopening Obsidian does not leave a notification to dismiss. Errors and conflicts are still reported, and "Sync now" and "Mirror from remote" show their toasts as before. A sync-on-edit toast that could stay on screen is also gone. There is no new setting.
+- **Test suite no longer changes the host's kernel settings.** The Android test layer runs its emulated device in a container that used to rewrite kernel settings of the machine running the tests. It is now confined so that a test run leaves the machine as it was. None of this changes the packaged plugin's behavior.
+
 ## [1.0.11] - 2026-10-10
 
 ### Fixed
@@ -490,6 +497,7 @@ Initial public releases (0.2.0 – 0.2.1) of the Nextcloud-specific sync engine:
 - **Clearer conflict outcomes in the dry-run** — the first-sync preview now explains what conflict resolution will produce, and each conflicted file is clickable to preview the exact merged before/after result.
 - **Faster than generic WebDAV** — by diffing content hashes against Nextcloud's `sync-token`, each sync transfers only what actually changed instead of recursively walking the entire remote tree on every run, so syncs complete noticeably faster than modification-time-based WebDAV plugins.
 
+[1.0.12]: https://github.com/siosig/obsidian-nextcloudsync/releases/tag/1.0.12
 [1.0.11]: https://github.com/siosig/obsidian-nextcloudsync/releases/tag/1.0.11
 [1.0.10]: https://github.com/siosig/obsidian-nextcloudsync/releases/tag/1.0.10
 [1.0.9]: https://github.com/siosig/obsidian-nextcloudsync/releases/tag/1.0.9

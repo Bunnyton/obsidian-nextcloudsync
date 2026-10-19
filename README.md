@@ -31,9 +31,10 @@ This plugin is still young and some behaviour can be rough around the edges. **P
 
 ---
 
-## What's new in this release (1.0.12-beta.3)
+## What's new in this release (1.0.12)
 
-- **Downloaded files keep the server's modification time on every device (1.0.12-beta.3)** — a file downloaded from Nextcloud now gets the same modification time as on the server, on mobile as well as on desktop, so "sort by modified time" shows the same order on every device. A merged note (automatic merge, conflict markers, or a resolved conflict) gets the time of the merge, on your device and on the server. A sync that writes no content leaves the time unchanged. There is no new setting.
+- **Downloaded files keep the server's modification time on every device (1.0.12)** — a file downloaded from Nextcloud now gets the same modification time as on the server, on mobile as well as on desktop, so "sort by modified time" shows the same order on every device. A merged note (automatic merge, conflict markers, or a resolved conflict) gets the time of the merge, on your device and on the server. A sync that writes no content leaves the time unchanged. There is no new setting.
+- **Quieter automatic syncs on mobile (1.0.12)** — a sync that you did not start (startup, returning to the app, periodic, or sync-on-edit) no longer shows a toast when nothing was transferred and there are no errors or conflicts, so reopening Obsidian does not leave a notification to dismiss. Errors and conflicts are still reported, and "Sync now" and "Mirror from remote" show their toasts as before. A sync-on-edit toast that could stay on screen is also gone. There is no new setting.
 
 For the full version history of every release, see the **[changelog](CHANGELOG.md)**.
 
