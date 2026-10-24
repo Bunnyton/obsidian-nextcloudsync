@@ -4,7 +4,9 @@ import { SyncEngine } from '../../../src/sync/SyncEngine';
 import { MirrorPlan } from '../../../src/sync/mirrorPlan';
 import { TFile, TFolder } from '../support/obsidian';
 import { sha256 } from '../../../src/util/hash';
-import { DavSyncSettings, FileState, RemoteFileInfo } from '../../../src/types';
+import { DEFAULT_SETTINGS, DavSyncSettings, FileState, RemoteFileInfo } from '../../../src/types';
+import { StateDB } from '../../../src/data/StateDB';
+import type { DataAdapter } from 'obsidian';
 
 const CONFIG_DIR = '.obsidian';
 const PLUGIN_DIR = `${CONFIG_DIR}/plugins/nextcloud-sync`;
@@ -444,5 +446,116 @@ describe('[SPEC:MDF-3] applyRemoteMirror — what is left behind stays tracked',
     });
     await engine.applyRemoteMirror(plan({ deleteFiles: ['a.md'] }));
     expect(store.has('a.md')).toBe(false);
+  });
+});
+
+const enc = new TextEncoder();
+const dec = new TextDecoder();
+const toBuf = (s: string): ArrayBuffer => enc.encode(s).buffer as ArrayBuffer;
+const PDIR = `${CONFIG_DIR}/plugins/p`;
+const QDIR = `${CONFIG_DIR}/plugins/q`;
+
+async function makePluginMirrorWorld(input: { remote: Record<string, string>; local: Record<string, string> }) {
+  const vault = new Map<string, string>(Object.entries(input.local));
+  const writes: string[] = [];
+  const kv: Record<string, string> = {};
+  const stateAdapter = {
+    read: jest.fn(async (p: string) => kv[p] ?? ''),
+    write: jest.fn(async (p: string, d: string) => { kv[p] = d; }),
+    exists: jest.fn(async (p: string) => p in kv),
+    remove: jest.fn(async (p: string) => { delete kv[p]; }),
+    rename: jest.fn(async (f: string, t: string) => { kv[t] = kv[f]; delete kv[f]; }),
+    stat: jest.fn(), list: jest.fn(), readBinary: jest.fn(), writeBinary: jest.fn(),
+  } as unknown as DataAdapter;
+  const stateDB = new StateDB(stateAdapter, PLUGIN_DIR, 'dev1');
+  await stateDB.load();
+  const store = (p: string, d: string): void => { writes.push(p); vault.set(p, d); };
+  const sizeOf = (p: string): number => enc.encode(vault.get(p) ?? '').length;
+  const localAdapter = {
+    listVaultFiles: jest.fn(() => [...vault.keys()].filter((p) => !p.startsWith('.'))
+      .map((p) => ({ path: p, size: sizeOf(p), mtime: 1 }))),
+    list: jest.fn(async () => ({ files: [], folders: [] })),
+    stat: jest.fn(async (p: string) => (vault.has(p) ? { size: sizeOf(p), mtime: 1 } : null)),
+    exists: jest.fn(async (p: string) => vault.has(p)),
+    read: jest.fn(async (p: string) => vault.get(p) ?? ''),
+    readBinary: jest.fn(async (p: string) => toBuf(vault.get(p) ?? '')),
+    atomicWrite: jest.fn(async (p: string, d: string) => { store(p, d); }),
+    atomicWriteBinary: jest.fn(async (p: string, d: ArrayBuffer) => { store(p, dec.decode(d)); }),
+    writeBinary: jest.fn(async (p: string, d: ArrayBuffer) => { store(p, dec.decode(d)); }),
+    remove: jest.fn(async (p: string) => { vault.delete(p); }),
+    ignore: jest.fn(),
+  };
+  const remoteInfos = async (): Promise<RemoteFileInfo[]> => Promise.all(Object.entries(input.remote).map(
+    async ([path, body]) => ({
+      path, fileId: `fid-${path}`, checksum: await sha256(toBuf(body)), etag: null, size: enc.encode(body).length, lastModified: 1,
+    })));
+  const client = {
+    getFiles: jest.fn(remoteInfos),
+    getDirectories: jest.fn(async () => []),
+    getSyncToken: jest.fn(async () => null),
+    remoteExists: jest.fn(async (p: string) => p in input.remote),
+    recalcChecksum: jest.fn(async () => null),
+    downloadFile: jest.fn(async (p: string) => toBuf(input.remote[p] ?? '')),
+  };
+  const app = {
+    vault: {
+      adapter: {
+        exists: jest.fn(async (p: string) => vault.has(p)),
+        remove: jest.fn(async (p: string) => { vault.delete(p); }),
+        mkdir: jest.fn(async () => undefined),
+      },
+      getAbstractFileByPath: (p: string) => (vault.has(p) ? new TFile(p) : null),
+      getAllFolders: () => [],
+      configDir: CONFIG_DIR,
+    },
+    fileManager: { trashFile: jest.fn(async (f: TFile) => { vault.delete(f.path); }) },
+  };
+  const awaiting = new Set<string>();
+  const engine = new SyncEngine({
+    app, settings: { ...DEFAULT_SETTINGS, syncOnWifiOnly: false, syncConfigFolder: true, syncedCommunityPlugins: ['p'] },
+    localAdapter, stateDB, statusBar: { setStatus: jest.fn(), setSyncComplete: jest.fn(), setProgress: jest.fn() },
+    webdavFactory: { createClient: jest.fn(async () => ({ client, features: { isNextcloud: true } })) },
+    pluginDir: PLUGIN_DIR, configDir: CONFIG_DIR, pluginsAwaitingRestart: awaiting,
+  } as never);
+  return { engine, vault, writes, awaiting };
+}
+
+describe('[SPEC:CPS-18] Mirror from remote and community plugins', () => {
+  beforeEach(() => { (globalThis as { navigator?: unknown }).navigator ??= {}; });
+
+  it('writes the listed plugin code and reports it as needing a restart', async () => {
+    const w = await makePluginMirrorWorld({
+      remote: { [`${PDIR}/manifest.json`]: '{"id":"p","version":"2.0.0"}', [`${PDIR}/main.js`]: 'code' },
+      local: {},
+    });
+    const result = await w.engine.applyRemoteMirror(await w.engine.planRemoteMirror());
+    expect(w.vault.get(`${PDIR}/main.js`)).toBe('code');
+    expect(result.pluginsNeedingRestart).toEqual(['p']);
+    expect(w.awaiting.has('p')).toBe(true);
+  });
+
+  it('does not write the remote files of, or delete the local files of, a plugin that is not listed', async () => {
+    const w = await makePluginMirrorWorld({
+      remote: { [`${QDIR}/main.js`]: 'remote q', [`${PDIR}/main.js`]: 'code', [`${PDIR}/manifest.json`]: '{"id":"p","version":"1.0.0"}' },
+      local: { [`${QDIR}/main.js`]: 'local q', [`${QDIR}/extra.js`]: 'local only' },
+    });
+    await w.engine.applyRemoteMirror(await w.engine.planRemoteMirror());
+    expect(w.vault.get(`${PDIR}/main.js`)).toBe('code');
+    expect(w.vault.get(`${QDIR}/main.js`)).toBe('local q');
+    expect(w.vault.get(`${QDIR}/extra.js`)).toBe('local only');
+  });
+
+  it('does not write data.json of a plugin put awaiting restart between the plan and the apply', async () => {
+    const w = await makePluginMirrorWorld({
+      remote: {
+        [`${PDIR}/manifest.json`]: '{"id":"p","version":"1.0.0"}', [`${PDIR}/main.js`]: 'code', [`${PDIR}/data.json`]: '{"a":1}',
+      },
+      local: {},
+    });
+    const planned = await w.engine.planRemoteMirror();
+    w.awaiting.add('p');
+    await w.engine.applyRemoteMirror(planned);
+    expect(w.vault.get(`${PDIR}/main.js`)).toBe('code');
+    expect(w.vault.has(`${PDIR}/data.json`)).toBe(false);
   });
 });

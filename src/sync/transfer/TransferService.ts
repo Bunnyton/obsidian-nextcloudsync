@@ -17,10 +17,13 @@ import { isAnomalousRemoteContent, isOverFileSizeLimit } from '../../util/limits
 import { sha256 } from '../../util/hash';
 import { remoteIdOf } from '../remoteIdentity';
 import { bytesEqual } from '../identity/contentIdentity';
+import type { LocalWritePort } from '../plugins/PluginSyncCoordinator';
 
 export interface TransferDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary' | 'atomicWriteBinary'>;
   stateDB: Pick<StateDB, 'getFile' | 'setFile'>;
+  // Chooses the mtime of a fetched body and is told after each write (a plugin's data.json gets the write time).
+  localWrite: LocalWritePort;
   journal: SyncJournal;
   mergeBase: MergeBaseRecorder;
   // Read at call time: the cap is a live setting.
@@ -148,7 +151,9 @@ export class TransferService {
       void this.deps.logger?.log(`download: body identical to the local file → state converged, no write → ${remote.path}`);
       return;
     }
-    await this.deps.localAdapter.atomicWriteBinary(remote.path, data, remote.lastModified || undefined);
+    const writeMtime = this.deps.localWrite.mtimeFor(remote.path, remote.lastModified || undefined);
+    await this.deps.localAdapter.atomicWriteBinary(remote.path, data, writeMtime);
+    this.deps.localWrite.written(remote.path);
     summary.downloadedCount++;
 
     const localHash = await sha256(data);

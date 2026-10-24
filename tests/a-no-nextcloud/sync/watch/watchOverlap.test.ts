@@ -16,6 +16,7 @@ import { RenameTracker } from '../../../../src/sync/RenameTracker';
 import { FileState, RemoteFileInfo, SyncSessionSummary } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { IUploadStrategy } from '../../../../src/sync/upload/IUploadStrategy';
+import { noPluginPath } from '../../support/pluginPorts';
 
 const PATH = 'note.md';
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -77,6 +78,7 @@ function buildRacy() {
     } as unknown as DeletionService,
     resolution: { dropCleanSnapshot: () => undefined } as unknown as ResolutionService,
     isSystemExcluded: () => false,
+    isPluginPath: noPluginPath,
     connect: async () => ({ client, uploadStrategy: {} as unknown as IUploadStrategy }),
     renameTracker: () => ({}) as unknown as RenameTracker,
     isBlockedByWifiOnly: () => false,

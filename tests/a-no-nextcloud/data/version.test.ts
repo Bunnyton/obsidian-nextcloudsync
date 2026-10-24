@@ -1,4 +1,5 @@
 import {
+  compareSemver,
   compareVersions,
   isSupportedNextcloudVersion,
   MIN_NEXTCLOUD_VERSION,
@@ -35,5 +36,20 @@ describe('isSupportedNextcloudVersion', () => {
 
   it('keeps the recommended minimum at the 33 major (Hub 26), not a patch pin', () => {
     expect(MIN_NEXTCLOUD_VERSION).toBe('33');
+  });
+});
+
+describe('[SPEC:CPS-4] compareSemver', () => {
+  it.each([
+    ['1.2.0-beta.3', '1.2.0', -1],
+    ['1.2.0-beta.2', '1.2.0-beta.10', -1],
+    ['1.0.0-alpha', '1.0.0-beta', -1],
+    ['1.10.0', '1.9.0', 1],
+    ['1.2.3', '1.2.3', 0],
+    ['abc', '1.0.0', 0],
+    ['1.0.0', '', 0],
+    ['', '', 0],
+  ])('compareSemver(%j, %j) = %s', (a, b, expected) => {
+    expect(compareSemver(a as string, b as string)).toBe(expected);
   });
 });

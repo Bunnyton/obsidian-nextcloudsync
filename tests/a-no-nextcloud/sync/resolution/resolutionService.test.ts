@@ -9,6 +9,7 @@ import { TransferService } from '../../../../src/sync/transfer/TransferService';
 import { FileState, RemoteFileInfo } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { IUploadStrategy } from '../../../../src/sync/upload/IUploadStrategy';
+import { passThroughLocalWrite } from '../../support/pluginPorts';
 
 const remote = (over: Partial<RemoteFileInfo> = {}): RemoteFileInfo => ({
   path: 'note.md', fileId: 'fid', checksum: null, etag: '"e"', size: 11, lastModified: 2000, ...over,
@@ -79,6 +80,7 @@ function build(o: Opts = {}, over: Partial<ResolutionDeps> = {}) {
       save: async () => { calls.saved++; },
       countConflicted: () => o.conflicted?.length ?? 0,
     } as unknown as ResolutionDeps['stateDB'],
+    localWrite: passThroughLocalWrite,
     historyStore: { save: async () => { /* noop */ } } as unknown as ResolutionDeps['historyStore'],
     cleanSideStore: {
       get: (p: string) => snaps.get(p),
@@ -364,5 +366,44 @@ describe('ResolutionService.getUnresolvedConflictCount', () => {
   it('reports what the state DB counts', async () => {
     const { service } = build({ conflicted: ['a.md', 'b.md'] });
     expect(await service.getUnresolvedConflictCount()).toBe(2);
+  });
+});
+
+describe('[SPEC:CPS-19] pullRemoteToLocal writes through LocalWritePort', () => {
+  const fakePort = () => ({ mtimeFor: jest.fn(() => 42), written: jest.fn() });
+
+  it('writes with the mtime the port chooses and reports the write once', async () => {
+    const localWrite = fakePort();
+    const { service, client, calls } = build({
+      localContent: 'old', remoteInfos: [remote({ lastModified: 1234567 })],
+    }, { localWrite });
+    await service.pullRemoteToLocal(client, 'note.md');
+    expect(localWrite.mtimeFor).toHaveBeenCalledWith('note.md', 1234567);
+    expect(calls.writeMtimes).toEqual([42]);
+    expect(localWrite.written).toHaveBeenCalledTimes(1);
+    expect(localWrite.written).toHaveBeenCalledWith('note.md');
+  });
+
+  it('passes undefined to the port when the remote has no lastModified', async () => {
+    const localWrite = fakePort();
+    const { service, client } = build({
+      localContent: 'old', remoteInfos: [remote({ lastModified: 0 })],
+    }, { localWrite });
+    await service.pullRemoteToLocal(client, 'note.md');
+    expect(localWrite.mtimeFor).toHaveBeenCalledWith('note.md', undefined);
+  });
+
+  it('does not report a write when the write throws', async () => {
+    const localWrite = fakePort();
+    const { service, client } = build({ localContent: 'old' }, {
+      localWrite,
+      localAdapter: {
+        stat: async () => ({ size: 3, mtime: 1000 }),
+        readBinary: async () => new ArrayBuffer(0),
+        atomicWriteBinary: async () => { throw new Error('disk full'); },
+      } as unknown as ResolutionDeps['localAdapter'],
+    });
+    await expect(service.pullRemoteToLocal(client, 'note.md')).rejects.toThrow('disk full');
+    expect(localWrite.written).toHaveBeenCalledTimes(0);
   });
 });

@@ -47,6 +47,15 @@ flowchart TD
 | Local FS + Vault cache enumeration | `data/LocalAdapter.ts` |
 | Persisted per-file state and sync token | `data/StateDB.ts` |
 | Tuning constants | `util/limits.ts` |
+| Community-plugin paths: the four bundle files, parsing `plugins/<id>/<file>`, the own-folder and state-DB exclusion | `sync/plugins/pluginPaths.ts` (pure) |
+| Direction of a plugin bundle (local / remote / hold) and the per-file action for it | `sync/plugins/bundleDirection.ts` (pure) |
+| Reading `manifest.json` and `community-plugins.json`; deciding which listed plugins are ignored and why | `sync/plugins/pluginCatalog.ts` |
+| Which updated plugins need a restart | `sync/plugins/restart.ts` (pure) |
+| Fingerprint of the sync scope (invalidates the root-ETag short-circuit) | `sync/plugins/scopeFingerprint.ts` (pure) |
+| Candidate list for the plugin picker (local and remote ids merged) | `sync/plugins/candidates.ts` |
+| Per-session coordinator: catalog, directions, restart set, notices | `sync/plugins/PluginSyncCoordinator.ts` |
+| Two-step confirmation of the plugin selection | `ui/pluginSelection.ts` (pure) |
+| Plugin picker dialog | `ui/CommunityPluginPickerModal.ts` |
 
 ## §2. Entry points and triggers
 
@@ -134,7 +143,7 @@ XML parsing yields to the event loop every `PARSE_YIELD_EVERY = 100` entries so 
 flowchart TD
   L["LocalScanner.scanLocalFiles() / collectLocalStats()"] --> V["LocalAdapter Vault-cache enumeration\n(Vault.getFiles → TFile.stat: mtime/size, no native stat)"]
   L --> C["ConfigSyncResolver.enumerateIncludedPaths()\n(enabled .obsidian categories only)"]
-  L --> Dot["LocalScanner.collectDotPaths()\n(dotfiles that Vault.getFiles drops; .obsidian/plugins is not walked)"]
+  L --> Dot["LocalScanner.collectDotPaths()\n(dotfiles that Vault.getFiles drops; .obsidian/plugins is never listed)"]
   V --> H{"hash needed?"}
   C --> H
   Dot --> H
@@ -144,7 +153,11 @@ flowchart TD
 
 - **Enumeration uses the Vault's in-memory index** (`Vault.getFiles` / `LocalAdapter.listVaultFiles()`) and
   avoids a native `stat` per file (the main reason mobile is fast). Dotfiles that the index drops are
-  re-enumerated through the adapter, but `.obsidian/plugins` is not walked (hard-exclude).
+  re-enumerated through the adapter, but `.obsidian/plugins` is never listed.
+- **Plugin files are added by `stat`, not by listing.** `ConfigSyncResolver.enumerateIncludedPaths()` asks the plugin gate for
+  `includedPluginIds()` and `stat`s the four bundle files (`manifest.json`, `main.js`, `styles.css`, `data.json`) of each id. Files that exist are
+  added, and the result still passes through `isIncluded`. `list` is never called under `plugins/`, so a plugin that is not in
+  the user's list costs no I/O.
 - **Hashing is the heaviest step and is avoided as far as possible.** `isLocallyUnchanged()` skips the hash when the stored **stat signature**
   (`localMtime` + `localSize`) equals the current stat. However, if the mtime is within
   `SIGNATURE_SAFETY_WINDOW_MS = 2000ms` of "now" or of the "last sync" (a filesystem-granularity guard), the file is hashed once and the
@@ -187,6 +200,22 @@ proves identity; only the SHA-256 does. The decision table (local file present):
 | yes | differs (file read) | no | yes | no | `uploadFile()` (unchanged) |
 | yes | either | no | no | n/a | Unchanged behaviour (a size mismatch goes to `handleConflict()`, otherwise nothing happens) |
 
+**Plugin code files take a separate route first.** For `plugins/<id>/main.js`, `manifest.json` and `styles.css`, `processRemoteFile()` asks
+`PluginSyncCoordinator.fileAction(path, state)` before the quadrant decision, passing whether each side is present, whether the file is
+tracked, and whether the content is identical. `data.json` and every other path return `null` and use the quadrants above.
+
+| `action` | Handling |
+|---|---|
+| `null`, `'normal'` | Fall through to the quadrants above |
+| `'skip'` | Do nothing |
+| `'download'` | Same call as the remote-only branch (`deferIfBeingEdited` then `downloadFile()`) |
+| `'upload'` | Same call as the local-only branch (If-Match `uploadFile()`; 412 goes to `handleConflict()`) |
+| `'hold'` | `handleConflict()`, which resolves to `safe-hold` through the plugin rule (§8) |
+
+The same `fileAction` filters the upload candidates of `processLocalModifications()` and the uploads and downloads of the initial plan; the
+conflicts of the initial plan stay conflicts and are resolved in `handleConflict()`. The direction itself is decided once per session, per
+plugin, by the pure `decideBundleDirection()` from the manifest versions, the change flags and the mtimes; the action table is `planBundleFileAction()`.
+
 ### §7.4 Upload, download and delete
 
 The `SyncEngine` methods below delegate to extracted services (see §17); the behaviour is described at the level of the operation.
@@ -204,6 +233,11 @@ The `SyncEngine` methods below delegate to extracted services (see §17); the be
   That the platform honours the option (adapter stat and vault cache, after the tmp-write rename and after `modifyBinary`) is checked
   on real Obsidian by `tests/b2-nextcloud-ui/scenarios/writeMtimeContract.b2.test.ts` (desktop) and
   `tests/b3-android-ui/scenarios/writeMtimeContract.b3.test.ts` (Android).
+- **`manifest.json` is written last.** Obsidian reads a plugin's `manifest.json` to decide that the plugin is installed and at which version, so
+  it must not appear before `main.js` and `styles.css`. The pure `partitionPluginManifestsLast()` splits a list stably into the rest and the
+  `plugins/<id>/manifest.json` items, and it is applied in three places: `incrementalSync` orders `eligible` as `[...rest, ...manifests]` before
+  the batch that serialises each folder; `executePlan` runs uploads, downloads (rest), unchanged, conflicts (rest), downloads (manifests) and
+  conflicts (manifests) in that order, so parallelism is kept; `MirrorService.applyRemoteMirror` orders `plan.downloads` the same way before its sequential loop.
 - **Local deletion** `applyLocalDeletion()` (`DeletionService.applyLocalDeletion()`) — confirmed with the server checksum. Baseline match ⇒ delete the remote
   (to the trash); divergence ⇒ **restore** to local (the remote edit is not lost); no checksum ⇒ skip (the safe side).
 - **Remote deletion** `processRemoteDeletion()` (`DeletionService.processRemoteDeletion()`) — **a security boundary**: `isSystemExcluded()` comes first
@@ -294,6 +328,21 @@ whitespace between the block and the body) and the body. Frontmatter equality is
 raw block byte for byte. The invariant is `fm + lead + body` equals the input for any input; `joinMarkdown(fm, lead, body)` puts the
 merged parts back together, adding a line break only when the block does not already end with one. `lead` follows the side that differs from the base (local when both differ).
 
+**Exception for community-plugin files.** `ConflictApplier` asks `pluginConflictRule(path)` right after the identical-content check. A non-null rule
+decides the outcome and the merge path is skipped; the rule is `null` for every other path, so behaviour there is unchanged.
+
+| Path | Rule |
+|---|---|
+| `plugins/<id>/` code file, direction `remote` | force `prefer-remote` |
+| same, direction `local` | force `prefer-local` |
+| same, direction `hold` | force `safe-hold` |
+| same, no direction | strategy `latest-mtime` |
+| `plugins/<id>/data.json` | strategy `otherFileStrategy` (never merged, so no markers are written into settings) |
+| anything else | `null` (existing route) |
+
+When a forced or strategy decision writes the remote copy, the write goes through `LocalWritePort` (`mtimeFor`, `written`) so that `data.json` gets
+its write-time mtime and code writes are recorded for the restart notice.
+
 ## §9. Settings that change the algorithm
 
 | Setting | Effect on the algorithm |
@@ -309,6 +358,7 @@ merged parts back together, adding a line break only when the block does not alr
 | `FIXED.fileLockingEnabled` | Fixed off (no LOCK/UNLOCK is issued; If-Match is the lost-update defence) |
 | `networkConcurrency` | Cap on parallel workers (§11) |
 | `syncConfigFolder` + `configSync.*` | Which `.obsidian` categories are in scope |
+| `syncedCommunityPlugins` | Per-device allow-list of community-plugin ids whose folder is synced (only while `syncConfigFolder` is ON). Normalised by `normalizePluginIdList` (own id removed, duplicates dropped). Each listed id is then filtered per session by the catalog (ignored when too large, newer than the app, desktop-only on mobile, and so on) |
 | `loggingEnabled` | While ON, this device's own log is excluded from sync (`isActiveOwnLog`; this setting replaces the former `debugLogEnabled` / `syncLogEnabled`) |
 | `massDeleteLimit` | Ceiling of the mass-delete breaker (`-1` = automatic dynamic limit / `0` = unlimited / `N` = fixed; `effectiveMassDeleteLimit`) |
 | `syncOnWifiOnly` | When ON and the connection is cellular, short-circuits the full sync and the six watch operations (the Wi-Fi gate in §2) |
@@ -378,6 +428,12 @@ remoteFileId, isConflicted, localMtime?, localSize?, remoteMtime? }`.
   Read through `getDir / setDir / deleteDir / getAllDirs`.
 - **Mirror persistence**: the mirror's `persist` saves, in this order, the state DB, the merge bases (flush) and the history. It runs in a
   `finally`, so it also runs when some items failed; a failed save is appended to the result's errors instead of being thrown, so the result is not shown as a success.
+- **`syncScopeFingerprint`** (`SyncState`, optional) is a digest of everything that changes which paths are in scope: `syncConfigFolder`, the
+  `configSync.*` categories, `excludedFolders`, the normalised `syncedCommunityPlugins` (`computeSyncScopeFingerprint`). At the start of a session the
+  engine compares it with the stored value; when it differs or is missing (an old state file) it clears the stored root ETag once, so the next
+  scan is a real one instead of a short-circuit, and then stores the new value. `StateDB.getSyncScopeFingerprint()` / `setSyncScopeFingerprint()`
+  mark the state dirty like `setRemoteRootEtag`, and `resetVaultIndex` clears the field with the root ETag. The root ETag is also cleared at the end of a
+  session when any listed plugin was ignored or a restart is still pending, because those states change without any remote change.
 - `SyncSessionSummary` aggregates the counts (uploaded/downloaded/deleted/merged/conflicted/error) + `retriedFiles`
   + `errors[]` and is reflected in the Sync Status dialog and the debug log.
 
@@ -518,6 +574,7 @@ separate modules. `SyncEngine.ts` keeps orchestration and the per-file decision;
 | `src/sync/watch/WatchOperations.ts` | Single-file / single-folder operations driven by watch | Class (**owns the in-flight and pending sets**) |
 | `src/sync/identity/contentIdentity.ts` | Proof that local and remote content are identical, and the converged baseline | Functions |
 | `src/sync/mirror/MirrorService.ts` | Mirror from remote (plan and apply) | Class |
+| `src/sync/plugins/PluginSyncCoordinator.ts` | Community-plugin session: catalog, per-plugin direction, `fileAction`, `conflictRuleFor`, restart set and notices | Class (**owns the session state and the awaiting-restart set**); implements `PluginPathGate`, `LocalWritePort`, `PluginSessionPort` |
 | `src/sync/SyncEngine.ts` | **Core loop** (3-point comparison, state transitions, plan execution), the **lifetime of the session**, the composition root, and delegation | Class |
 
 ### §17.1 Conventions the modules follow
@@ -570,6 +627,24 @@ graph TD
 **Only `watch` calls back into `SyncEngine`.** This is by design: the rule (C-3) is that "watch decides nothing itself and
 goes through the same classifier as the full sync". Because `processFile` is **injected as a port**, there is no
 import cycle.
+
+**Plugin session.** The coordinator is created by `SyncEngine` (the composition root) and handed to the services only as narrow ports, so
+no service imports the coordinator class: `ConfigSyncResolver` and the scanner know `PluginPathGate`
+(`isPluginFileIncluded`, `includedPluginIds`), `TransferService` and `ConflictApplier` know `LocalWritePort` (`mtimeFor`, `written`), and
+`MirrorService` knows `PluginSessionPort` (`begin`, `prepare`, `finish`, `discard`). Only `SyncEngine` calls `fileAction`, `conflictRuleFor` and `staleTrackedIds`.
+
+When the session methods run:
+
+| Moment | Call |
+|---|---|
+| Start of a session, after the client exists | `begin()`; then compare the scope fingerprint (§12) |
+| After the remote listing is known, before the local scan (initial sync) or before `eligible` is filtered (incremental sync) | `prepare(client, remoteFiles)`, then drop the tracking of ids that are no longer included (`staleTrackedIds`) |
+| Planning a mirror / applying a mirror | `begin()` then `prepare()`; planning ends with `discard()` (also on error); applying ends with `finish()` in a `finally` |
+| End of a session, in `finally`, before the state is saved | `finish()`: decides which updated plugins need a restart, adds them to the awaiting-restart set, shows the notices once, and reports whether to clear the root ETag; errors are logged, never thrown |
+| Outside a session (a write with no open session) | `written(path)` adds the id to the awaiting-restart set and shows the restart notice once |
+
+Before `begin()`, and between `begin()` and `prepare()`, the gate answers "not included" and `includedPluginIds()` is empty, so nothing under
+`plugins/` is touched by accident.
 
 ### §17.3 For transfer, the extraction order was the essence (record)
 
@@ -682,6 +757,14 @@ The decisions in `SyncEngine.processRemoteFile` (CC 33) and `processLocalModific
 **Reducing branches on paper alone is possible, but it would not make the code easier to understand.** To reduce them for real,
 conditional hashing would have to be redesigned as a data flow, and that would change the number and timing of sync I/O —
 a **change of behaviour**.
+
+**Community-plugin decisions follow the same split.** The decisions are pure functions with no I/O: `parsePluginPath` and the exclusion helpers in
+`pluginPaths`, `decideBundleDirection` and `planBundleFileAction` in `bundleDirection`, `evaluatePluginCatalogEntry` in `pluginCatalog`,
+`pluginsNeedingRestart` in `restart`, `computeSyncScopeFingerprint` in `scopeFingerprint`, `mergePluginCandidates` in `candidates`, and the
+selection logic in `ui/pluginSelection`. The execution (reading `manifest.json` and `community-plugins.json`, fetching a remote manifest,
+`stat`, notices, logging, the awaiting-restart set) lives in `PluginSyncCoordinator`, and the transfers themselves stay in `SyncEngine` and
+`TransferService`. The coordinator gathers facts and calls the pure functions; it holds no decision table of its own, so directions and
+actions are tested as tables without a vault or a server.
 
 ## §19. Layer structure
 

@@ -1,4 +1,5 @@
 import { DEFAULT_SETTINGS, DavSyncSettings } from '../types';
+import { isValidPluginId } from '../sync/plugins/pluginPaths';
 
 // Five-key configSync {appearance, themesSnippets, hotkeys, corePlugins, bookmarks} -> {bookmarks, others};
 // `others` is on if ANY of the four collapsed categories was. Run before migrateBookmarksToConfigSync.
@@ -166,4 +167,19 @@ export function pruneObsoleteSettings(settings: Record<string, unknown>): string
     }
   }
   return removed;
+}
+
+// Keeps only valid, non-own, unique plugin IDs in default UTF-16 order; anything that is not an array becomes [].
+export function normalizePluginIdList(value: unknown, ownId: string): string[] {
+  if (!Array.isArray(value)) return [];
+  const ids = new Set<string>();
+  for (const item of value as unknown[]) {
+    if (typeof item === 'string' && isValidPluginId(item) && item !== ownId) ids.add(item);
+  }
+  return [...ids].sort();
+}
+
+// Always assigns a fresh array so callers never share a reference with a previous value.
+export function normalizeSyncedCommunityPlugins(settings: DavSyncSettings, ownId: string): void {
+  settings.syncedCommunityPlugins = normalizePluginIdList(settings.syncedCommunityPlugins, ownId);
 }

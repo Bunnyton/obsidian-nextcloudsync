@@ -10,6 +10,7 @@ import { CleanSideStore } from '../../data/CleanSideStore';
 import { SyncHistoryStore } from '../../data/SyncHistoryStore';
 import { CleanSideMetrics } from '../../ui/compareResolution';
 import { IWebDAVClient } from '../../network/IWebDAVClient';
+import type { LocalWritePort } from '../plugins/PluginSyncCoordinator';
 import { IUploadStrategy } from '../upload/IUploadStrategy';
 import { SyncJournal } from '../session/SyncJournal';
 import { MergeBaseRecorder } from '../session/MergeBaseRecorder';
@@ -33,6 +34,8 @@ export interface Connection {
 export interface ResolutionDeps {
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary' | 'atomicWriteBinary'>;
   stateDB: Pick<StateDB, 'getFile' | 'setFile' | 'save' | 'countConflicted'>;
+  // Chooses the mtime of a pulled body and is told after each write, exactly as in TransferService.
+  localWrite: LocalWritePort;
   historyStore?: Pick<SyncHistoryStore, 'save'>;
   cleanSideStore?: Pick<CleanSideStore, 'get' | 'set' | 'delete' | 'paths' | 'requestSave'>;
   journal: SyncJournal;
@@ -168,7 +171,9 @@ export class ResolutionService {
     }
 
     const remoteData = await client.downloadFile(path);
-    await this.deps.localAdapter.atomicWriteBinary(path, remoteData, remote.lastModified || undefined);
+    const writeMtime = this.deps.localWrite.mtimeFor(path, remote.lastModified || undefined);
+    await this.deps.localAdapter.atomicWriteBinary(path, remoteData, writeMtime);
+    this.deps.localWrite.written(path);
 
     const localHash = await sha256(remoteData);
     const remoteId = remote.checksum ?? localHash;

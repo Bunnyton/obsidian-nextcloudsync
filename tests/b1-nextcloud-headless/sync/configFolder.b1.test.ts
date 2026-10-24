@@ -16,6 +16,7 @@ function resolver(syncConfigFolder: boolean, configSync: ConfigSyncCategories): 
     settings,
     pluginDir: PLUGIN_DIR,
     localAdapter: {} as unknown as Pick<LocalAdapter, 'list' | 'stat'>,
+    pluginGate: { isPluginFileIncluded: () => false, includedPluginIds: () => [] },
   });
 }
 

@@ -22,7 +22,7 @@ function makeReport(): SyncStatusReport {
       mergedCount: 0,
       conflictedCount: 1,
       errorCount: 1,
-      retriedFiles: [],
+      retriedFiles: [], pluginsNeedingRestart: [],
       errors: [{ path: 'err.md', message: 'boom' }],
     },
     conflictedFiles: ['c.md'],

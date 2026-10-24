@@ -83,6 +83,8 @@ function makeHost(over: Partial<SettingDefinitionsHost> = {}): SettingDefinition
     startLoginFlow: () => undefined,
     addExcludedFolder: () => undefined,
     removeExcludedFolder: () => undefined,
+    openCommunityPluginPicker: jest.fn(),
+    removeSyncedCommunityPlugin: jest.fn(),
     renderAppPassword: () => undefined,
     renderNumberSlider: () => undefined,
     renderReadOnly: () => undefined,
@@ -167,13 +169,83 @@ describe('[SPEC:DSD-2] row count is dynamic, not a constant', () => {
     expect(three).toBe(STATIC_ROW_COUNT + 3);
   });
 
-  it('adds the two config-sync category rows only while the master toggle is on', () => {
-    const off = settingRowsIn(buildSettingDefinitions(makeHost())).length;
-    const on = settingRowsIn(
-      buildSettingDefinitions(makeHost({ settings: { ...DEFAULT_SETTINGS, syncConfigFolder: true } })),
+  // The community-plugins warning is a render-only decoration, but it is a row the user sees, so it counts here.
+  const countRows = (settings: Partial<DavSyncSettings>): number =>
+    flatten(buildSettingDefinitions(makeHost({ settings: { ...DEFAULT_SETTINGS, ...settings } }))).filter(
+      (f) => f.row.name === 'Community plugins warning' || !RENDER_ONLY_ROWS.decorations.includes(f.row.name),
     ).length;
-    expect(off).toBe(STATIC_ROW_COUNT);
-    expect(on).toBe(STATIC_ROW_COUNT + 2);
+  const expected = (s: Partial<DavSyncSettings>): number =>
+    STATIC_ROW_COUNT + (s.excludedFolders?.length ?? 0) + (s.syncConfigFolder ? 4 + (s.syncedCommunityPlugins?.length ?? 0) : 0);
+
+  it.each([
+    { syncConfigFolder: false },
+    { syncConfigFolder: true, syncedCommunityPlugins: [] },
+    { syncConfigFolder: true, syncedCommunityPlugins: ['a', 'b'] },
+    { syncConfigFolder: true, syncedCommunityPlugins: ['a', 'b'], excludedFolders: ['x', 'y', 'z'] },
+  ])('counts 27 + excluded + (master ? 4 + plugins : 0) rows for %j', (s) => {
+    expect(countRows(s)).toBe(expected(s));
+  });
+
+  it('adds no community plugin row while the master toggle is off, even when the list is set', () => {
+    const s = { syncConfigFolder: false, syncedCommunityPlugins: ['a', 'b'] };
+    expect(countRows(s)).toBe(STATIC_ROW_COUNT);
+    const names = rowsOf(buildSettingDefinitions(makeHost({ settings: { ...DEFAULT_SETTINGS, ...s } }))).map((r) => r.name);
+    expect(names).not.toContain('Choose plugins…');
+    expect(names).not.toContain('Community plugins warning');
+  });
+});
+
+describe('[SPEC:CPS-10] community plugin rows', () => {
+  const master = { ...DEFAULT_SETTINGS, syncConfigFolder: true, syncedCommunityPlugins: ['a', 'b'] };
+  const configRows = (host: SettingDefinitionsHost): any[] =>
+    flatten(buildSettingDefinitions(host)).filter((f) => f.heading === 'Config folder (.obsidian)').map((f) => f.row);
+
+  it('orders the rows after the categories: warning, one row per plugin, then Choose plugins…', () => {
+    const names = configRows(makeHost({ settings: master })).map((r) => r.name);
+    const w = names.indexOf('Community plugins warning');
+    expect(w).toBeGreaterThan(names.indexOf('Sync config folder'));
+    expect(names.slice(w)).toEqual(['Community plugins warning', 'a', 'b', 'Choose plugins…']);
+    expect(names.slice(0, w).length).toBe(3); // master toggle + two categories
+  });
+
+  it('gives every community plugin row a non-empty desc', () => {
+    const rows = configRows(makeHost({ settings: master }));
+    for (const r of rows.slice(rows.findIndex((x) => x.name === 'Community plugins warning'))) {
+      expect(typeof r.desc).toBe('string');
+      expect(r.desc.length).toBeGreaterThan(0);
+    }
+  });
+
+  it('removes a plugin from the list when its row is clicked', () => {
+    const host = makeHost({ settings: master });
+    configRows(host).find((r) => r.name === 'a').action();
+    expect(host.removeSyncedCommunityPlugin).toHaveBeenCalledWith('a');
+    expect(host.openCommunityPluginPicker).not.toHaveBeenCalled();
+  });
+
+  it('opens the picker from Choose plugins… with the documented aliases', () => {
+    const host = makeHost({ settings: master });
+    const row = configRows(host).find((r) => r.name === 'Choose plugins…');
+    expect(row.aliases).toEqual(['plugins', 'community plugins', 'plugin sync', 'add plugin']);
+    row.action();
+    expect(host.openCommunityPluginPicker).toHaveBeenCalledTimes(1);
+  });
+
+  it('describes the plugin rows and the two reworded parent rows', () => {
+    const rows = configRows(makeHost({ settings: master }));
+    expect(rows.find((r) => r.name === 'a').desc).toBe('Synced. Click to stop syncing this plugin on this device.');
+    expect(rows.find((r) => r.name === 'Choose plugins…').desc).toBe(
+      'Pick community plugins to sync from the ones installed on this device or on the server. Only manifest.json, main.js, styles.css and data.json directly in each plugin folder sync; ' +
+      'other files stay device-local. Each device has its own list, and a plugin syncs only between devices that both list it. ' +
+      'Turning a plugin on or off (community-plugins.json) is never synced.',
+    );
+    expect(rows.find((r) => r.name === 'Sync config folder').desc).toBe(
+      'Opt in to syncing parts of the .obsidian config folder across devices. Off by default — only notes and other vault files sync. Community plugins sync only when you pick them below; everything else in the plugins folder stays device-local. A synced change to core-plugin settings may need an Obsidian restart to take effect on the other device.',
+    );
+    const excluded = flatten(buildSettingDefinitions(makeHost())).find((f) => f.row.name === 'Excluded folders')!.row;
+    expect(excluded.desc).toBe(
+      'Folders that are never synced — neither uploaded nor downloaded. Matched by folder prefix at a folder boundary, additive on top of .git, .trash, this plugin\'s own folder, and community plugins you have not picked, which are already excluded automatically.',
+    );
   });
 });
 

@@ -26,7 +26,7 @@ function makeStateAdapter(): DataAdapter {
 
 const summary = (): SyncSessionSummary => ({
   startedAt: 0, completedAt: null, uploadedCount: 0, downloadedCount: 0, deletedCount: 0,
-  mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], errors: [],
+  mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], pluginsNeedingRestart: [], errors: [],
 });
 
 // An engine whose download and conflict paths are replaced by counters, so the test observes the DECISION

@@ -21,6 +21,7 @@ import { isAnomalousRemoteContent } from '../../util/limits';
 import { FileLogger } from '../../util/FileLogger';
 import { sha256 } from '../../util/hash';
 import { bytesEqual, checksumProvesIdentical, convergedState } from '../identity/contentIdentity';
+import type { LocalWritePort, PluginConflictRule } from '../plugins/PluginSyncCoordinator';
 import type { App } from 'obsidian';
 
 export interface Connection {
@@ -37,6 +38,9 @@ export interface ConflictDeps {
   mergeBase: MergeBaseRecorder;
   transfer: TransferService;
   resolution: Pick<ResolutionService, 'captureCleanSides'>;
+  localWrite: LocalWritePort;
+  // The conflict rule for a plugin file, or null for any other path.
+  pluginConflictRule(path: string): PluginConflictRule | null;
   // Read at call time so a settings change takes effect.
   resolverConfig(): MergeConfig;
   maxFileSizeMB(): number;
@@ -81,6 +85,14 @@ export class ConflictApplier {
       remoteMtime: remote.lastModified || 0,
     };
 
+    // Plugin files never enter text merge: the coordinator's rule decides without reading the local body.
+    const rule = this.deps.pluginConflictRule(path);
+    if (rule !== null) {
+      const ruled = this.decideByPluginRule(rule, path, ctx);
+      await this.applyDecision(conn, path, base, remote, remoteId, idType, summary, ruled, identity.remoteData);
+      return;
+    }
+
     // `merge` and every markdown file need both sides' text; the other strategies decide from size/mtime,
     // so their remote download is deferred until required.
     let remoteData: ArrayBuffer | undefined = identity.remoteData;
@@ -106,6 +118,28 @@ export class ConflictApplier {
       decision = resolver.decide(path, '', '', '', ctx);
     }
 
+    await this.applyDecision(conn, path, base, remote, remoteId, idType, summary, decision, remoteData);
+  }
+
+  private decideByPluginRule(
+    rule: PluginConflictRule, path: string,
+    ctx: { localSize: number; remoteSize: number; localMtime: number; remoteMtime: number },
+  ): ConflictResolution {
+    if (rule.kind === 'force') return { action: rule.action };
+    // No auto-merge types, so the strategy alone decides and no body is read.
+    const resolver = new ConflictResolver(this.deps.app, this.deps.localAdapter, {
+      ...this.deps.resolverConfig(), autoMergeFileTypes: [], otherFileStrategy: rule.strategy,
+    });
+    return resolver.decide(path, '', '', '', ctx);
+  }
+
+  private async applyDecision(
+    conn: Connection,
+    path: string, base: FileState | undefined, remote: RemoteFileInfo,
+    remoteId: string, idType: FileState['idType'], summary: SyncSessionSummary,
+    decision: ConflictResolution, fetched: ArrayBuffer | undefined,
+  ): Promise<void> {
+    let remoteData = fetched;
     switch (decision.action) {
       case 'safe-hold':
         // Markers would corrupt a non-text file: leave both sides untouched and flag it conflicted, with
@@ -286,7 +320,10 @@ export class ConflictApplier {
       return;
     }
     try {
-      await this.deps.localAdapter.atomicWriteBinary(path, remoteData, remote.lastModified || undefined);
+      await this.deps.localAdapter.atomicWriteBinary(
+        path, remoteData, this.deps.localWrite.mtimeFor(path, remote.lastModified || undefined),
+      );
+      this.deps.localWrite.written(path);
     } catch (err) {
       this.deps.journal.recordError(summary, path, err);
       this.deps.queueRetry(path);

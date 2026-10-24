@@ -102,6 +102,17 @@ export class NextcloudSyncSettingTab extends PluginSettingTab implements Setting
   }
 
 
+  openCommunityPluginPicker(): void {
+    this.plugin.openCommunityPluginPicker(() => this.update());
+  }
+
+  async removeSyncedCommunityPlugin(id: string): Promise<void> {
+    this.plugin.settings.syncedCommunityPlugins =
+      (this.plugin.settings.syncedCommunityPlugins ?? []).filter((p) => p !== id);
+    await this.plugin.saveSettings();
+    this.update();
+  }
+
   renderNotice(setting: Setting, text: string, cls?: string): void {
     setting.settingEl.empty();
     setting.settingEl.addClass('setting-item-description');
