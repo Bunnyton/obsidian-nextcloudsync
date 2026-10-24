@@ -31,9 +31,9 @@ This plugin is still young and some behaviour can be rough around the edges. **P
 
 ---
 
-## What's new in this release (1.0.13-beta.1)
+## What's new in this release (1.0.13-beta.2)
 
-- **Public link shares are detected as Nextcloud (1.0.13-beta.1)** — a Server URL that points at a Nextcloud public link share (`/public.php/webdav/` or the newer `/public.php/dav/files/<token>/`) is now recognised as Nextcloud, so syncing uses the fast change detection (one listing request and the root-ETag shortcut) instead of walking every folder with a separate request. On a public share, version history and chunked upload stay off because they need the account's own endpoints; large files upload in a single request. A renamed (themed) Nextcloud whose OCS endpoint is blocked is now detected as well. No settings were added.
+- **Sync selected community plugins (1.0.13-beta.2)** — with **Sync config folder** ON, **Choose plugins…** lets each device pick the community plugins to sync; the list is empty by default, so nothing changes until you add one. Only `manifest.json`, `main.js`, `styles.css` and `data.json` of a listed plugin sync, and only between devices that list it. **Dangerous:** syncing a plugin copies its code to your other devices, where Obsidian runs it, so adding one asks for confirmation twice. When the code of an enabled plugin changes, you are asked to restart Obsidian, and its settings (`data.json`) wait until then. Plugins that are desktop-only on mobile, over the size limit, or need a newer Obsidian are skipped on that device. Which plugins are enabled stays local to each device.
 
 For the full version history of every release, see the **[changelog](CHANGELOG.md)**.
 
