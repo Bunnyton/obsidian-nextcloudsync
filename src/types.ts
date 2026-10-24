@@ -199,6 +199,12 @@ export interface NextcloudFeatures {
   hasFilesLocking: boolean;
   /** Bulk-upload endpoint `/remote.php/dav/bulk` is advertised or probed positive. */
   hasBulkUpload: boolean;
+  /**
+   * The account-only DAV namespaces (`/remote.php/dav/uploads/<user>` for chunked upload,
+   * `/remote.php/dav/versions/<user>` for version history) are reachable. False on a public link share
+   * (`/public.php/...`, whose credentials are the share token and password) and on plain WebDAV (docs/spec.md §3).
+   */
+  hasAccountDav: boolean;
   syncToken: string | null;
 }
 

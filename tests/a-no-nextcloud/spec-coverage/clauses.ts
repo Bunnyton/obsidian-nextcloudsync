@@ -490,9 +490,16 @@ export const CLAUSES: Clause[] = [
   // SCR: the sync-collection REPORT is never issued (issue #37)
   { id: 'SCR-1', source: 'specs/main/spec.md §18 F1a (getSyncToken never issues the REPORT; no server-side ERROR log per client) — GitHub issue #37', layer: 'a' },
   // SD: server-type detection and client dispatch
-  { id: 'SD-1', source: 'specs/main/spec.md §1 (detection from probe answers; case table D-1..D-7 in specs/073-webdav-client-dispatch/contracts/server-detection.md)', layer: 'a' },
+  { id: 'SD-1', source: 'docs/spec.md §3 (detection from probe answers: capabilities OR status.php versionstring; case table D-1..D-15 incl. public link shares, renamed Nextcloud, non-JSON status.php)', layer: 'a' },
   { id: 'SD-2', source: 'specs/main/spec.md §1 (detection adds no probe round-trips on the Nextcloud path — INV-4)', layer: 'a' },
   { id: 'SD-3', source: 'specs/main/spec.md §1 (degradation proven against a real plain WebDAV server: standard client, isNextcloud false, listing without Depth: infinity, full round-trip)', layer: 'b-4', waiver: 'Verified in the b-4 layer against a live Apache mod_dav container (pnpm test:b4); cannot run in the default CI suite, which has no server.' },
+  { id: 'SD-4', source: 'docs/spec.md §3 (probe root = Server URL with the first /remote.php or /public.php onward removed; isPublicShare from the same match; no other normalisation)', layer: 'a' },
+  { id: 'SD-5', source: 'docs/spec.md §3 (server version from capabilities, falling back to status.php versionstring)', layer: 'a' },
+  { id: 'SD-6', source: 'docs/spec.md §3 (hasAccountDav: chunked upload and version history are off on a public link share; no request reaches the uploads/versions namespaces)', layer: 'a' },
+  { id: 'SD-7', source: 'docs/spec.md §3 (a real Nextcloud public link share, legacy and token URL forms, is detected as Nextcloud with hasAccountDav false and no locking)', layer: 'b-1' },
+  { id: 'SD-8', source: 'docs/spec.md §3 / §8a.5 (sync over a real public link share uses the Depth: infinity listing and the root-ETag short-circuit)', layer: 'b-1' },
+  { id: 'SD-9', source: 'docs/spec.md §3 (sync over a real public link share sends no request to the uploads/versions namespaces and no LOCK; a file above the chunk threshold uploads in one PUT)', layer: 'b-1' },
+  { id: 'SD-10', source: 'docs/spec.md §3 / §4.1 (a PUT through a real public link share alone makes the server record the SHA-256 checksum; the next sync does not re-download the file)', layer: 'b-1' },
   // SMB: Sync status "Mirror from remote" button
   // A second entry point to Mirror from remote on the Sync status dialog's top action row: pure DOM wiring
   // that delegates to runRemoteMirror() (single source of truth), whose plan/apply/guard logic MIR-1..3 cover.

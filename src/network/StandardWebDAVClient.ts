@@ -74,7 +74,7 @@ export class StandardWebDAVClient implements IWebDAVClient {
       throw: false,
     });
     if (res.status !== 207 && res.status !== 200) throw new NetworkError(res.status, res.text, 'PROPFIND');
-    return { isNextcloud: false, version: '', hasChecksums: false, hasFilesLocking: false, hasBulkUpload: false, syncToken: null };
+    return { isNextcloud: false, version: '', hasChecksums: false, hasFilesLocking: false, hasBulkUpload: false, hasAccountDav: false, syncToken: null };
   }
 
   async getFiles(path: string): Promise<RemoteFileInfo[]> {

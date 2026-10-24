@@ -46,6 +46,7 @@ describePlainDav('[SPEC:SD-3] b-4 — plugin against a real plain WebDAV server'
         hasChecksums: false,
         hasFilesLocking: false,
         hasBulkUpload: false,
+        hasAccountDav: false,
         syncToken: null,
       });
     });

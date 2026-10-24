@@ -10,7 +10,7 @@ import { NextcloudFeatures } from '../../../src/types';
 function makeEngine(features: Partial<NextcloudFeatures>) {
   const feats: NextcloudFeatures = {
     isNextcloud: true, version: '30', hasChecksums: true, hasFilesLocking: false,
-    hasBulkUpload: false, syncToken: null, ...features,
+    hasBulkUpload: false, hasAccountDav: true, syncToken: null, ...features,
   };
   const client = {
     lockFile: jest.fn(async () => 'lock-token'),
@@ -76,5 +76,15 @@ describe('[SPEC:FX-4] feature 033 — file locking is always off (no LOCK issued
     const token = await (engine as unknown as { acquireLock(p: string): Promise<string | null> }).acquireLock('a.md');
     expect(token).toBeNull();
     expect(client.lockFile).not.toHaveBeenCalled();
+  });
+});
+
+describe('[SPEC:SD-6] a public link share never selects the chunked strategy', () => {
+  afterEach(() => { Platform.isMobile = false; });
+
+  it('selects the simple strategy when hasAccountDav is false', async () => {
+    const { engine } = makeEngine({ isNextcloud: true, hasAccountDav: false });
+    await ensureClient(engine);
+    expect(strategyOf(engine)).toBeInstanceOf(SimpleUploadStrategy);
   });
 });

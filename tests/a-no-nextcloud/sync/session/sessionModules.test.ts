@@ -247,7 +247,8 @@ describe('withLocalSignature', () => {
 });
 
 describe('VersionService', () => {
-  const NEXTCLOUD = { isNextcloud: true } as NextcloudFeatures;
+  const NEXTCLOUD = { isNextcloud: true, hasAccountDav: true } as NextcloudFeatures;
+  const PUBLIC_SHARE = { isNextcloud: true, hasAccountDav: false } as NextcloudFeatures;
   const PLAIN = { isNextcloud: false } as NextcloudFeatures;
   const version = { id: 'v1' } as unknown as FileVersion;
 
@@ -283,6 +284,15 @@ describe('VersionService', () => {
     const { service, client, calls } = build(tracked('fid-7'));
     expect(await service.listVersions(client, NEXTCLOUD, 'note.md')).toEqual([version]);
     expect(calls.listed).toEqual(['fid-7']);
+  });
+
+  it('[SPEC:SD-6] refuses on a public link share without touching the client', async () => {
+    const { service, client, calls } = build(tracked('fid-7'));
+    await expect(service.listVersions(client, PUBLIC_SHARE, 'note.md')).rejects.toThrow(FeatureUnsupportedError);
+    await expect(service.restoreVersion(client, PUBLIC_SHARE, 'note.md', version)).rejects.toThrow(FeatureUnsupportedError);
+    expect(calls.listed).toEqual([]);
+    expect(calls.restored).toEqual([]);
+    expect(calls.wrote).toEqual([]);
   });
 
   it('refuses on a non-Nextcloud server', async () => {

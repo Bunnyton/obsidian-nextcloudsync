@@ -304,7 +304,7 @@ merged parts back together, adding a line break only when the block does not alr
 | `autoMergeFileStrategy` | Strategy for Auto Merge Files (`merge`/`biggest-size`/`latest-mtime`/`local-win`/`remote-win`) |
 | `otherFileStrategy` | Strategy for Other Files (the 4 values other than `merge`) |
 | `FIXED.maxConflictRegions` | Merge circuit breaker (fixed at 0 = unlimited; never fires) |
-| `FIXED.chunkedUploadEnabled` | Chunked or Simple (fixed on; Nextcloud only) |
+| `FIXED.chunkedUploadEnabled` | Chunked or Simple (fixed on; chunked upload needs a Nextcloud account DAV area, so public shares use Simple) |
 | `chunkThresholdMB(isMobile)` / `maxFileSizeMB` | Chunk threshold (fixed: 50 desktop / 20 mobile) / forced-skip ceiling |
 | `FIXED.fileLockingEnabled` | Fixed off (no LOCK/UNLOCK is issued; If-Match is the lost-update defence) |
 | `networkConcurrency` | Cap on parallel workers (§11) |
@@ -320,7 +320,7 @@ The `FIXED` constants and `chunkThresholdMB` are defined in `src/util/fixedSyncC
 
 ```mermaid
 flowchart TD
-  E["SyncEngine.ensureClient()"] --> P{"FIXED.chunkedUploadEnabled (always true) AND isNextcloud?"}
+  E["SyncEngine.ensureClient()"] --> P{"FIXED.chunkedUploadEnabled (always true) AND isNextcloud AND hasAccountDav?"}
   P -- yes --> Ch["ChunkedUploadStrategy"]
   P -- no  --> Si["SimpleUploadStrategy"]
   Ch --> D{"size vs settings"}
@@ -693,7 +693,7 @@ Sync:     SyncEngine (capability detection, 3-point comparison, state decision, 
           sync/conflict/ (ConflictApplier) / sync/resolution/ (Compare, forced resolution, clean-side)
           sync/deletion/ / sync/directory/ / sync/watch/ / sync/versions/ / sync/mirror/
           merge/ (MergeEngine, ReconcileTextStrategy, Diff3Strategy)
-Network:  WebDAVFactory / NextcloudClient (extended PROPFIND, sync-token, OCS, chunk, lock, versions) / StandardWebDAVClient
+Network:  WebDAVFactory / NextcloudClient (extended PROPFIND, sync-token, OCS, chunk, lock, versions) / StandardWebDAVClient / serverUrl (parseServerUrl: probe root and public-share detection)
           network/dav/ (pure functions that read PROPFIND responses)
 Data:     LocalAdapter (atomic, IgnoreList) / StateDB (per device, atomic, recovery) / MergeBaseStore (per device, 3-way base) / SyncHistoryStore
 Core:     main.ts (initialisation, DI, lifecycle, command registration)
