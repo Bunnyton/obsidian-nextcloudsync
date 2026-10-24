@@ -27,7 +27,7 @@ function makeEngine(over: {
 }) {
   const feats: NextcloudFeatures = {
     isNextcloud: true, version: '30', hasChecksums: true, hasFilesLocking: false,
-    hasBulkUpload: false, syncToken: null,
+    hasBulkUpload: false, hasAccountDav: true, syncToken: null,
   };
   const localFiles = over.localFiles ?? [];
   const byPath = new Map(localFiles.map((f) => [f.path, f.content]));

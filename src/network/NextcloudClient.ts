@@ -1,5 +1,6 @@
 import { RequestUrlParam, RequestUrlResponse } from 'obsidian';
 import { requestUrlWithTimeout } from './requestWithTimeout';
+import { parseServerUrl } from './serverUrl';
 import {
   NextcloudFeatures,
   RemoteFileInfo,
@@ -61,6 +62,21 @@ const REPORT_BODY = (syncToken: string) => `<?xml version="1.0" encoding="utf-8"
   </d:prop>
 </d:sync-collection>`;
 
+// OCS answered nothing: the capability set used when OCS is not asked at all or does not answer.
+const NO_CAPABILITIES = { ocsAnswered: false, version: '', hasChecksums: false, hasFilesLocking: false, hasBulkUpload: false };
+
+// Reads a probe body as a JSON object; anything else is "no evidence", never an exception (docs/spec.md §3).
+function readJsonObject(res: RequestUrlResponse): Record<string, unknown> | null {
+  try {
+    const v: unknown = res.json;
+    if (typeof v !== 'object' || v === null || Array.isArray(v)) return null;
+    return v as Record<string, unknown>;
+  } catch {
+    // The body is not JSON: treat it as no evidence rather than failing the connection.
+    return null;
+  }
+}
+
 export class NextcloudClient implements IWebDAVClient {
   private features: NextcloudFeatures | null = null;
   private readonly createdDirs = new RemoteDirCache();
@@ -79,13 +95,17 @@ export class NextcloudClient implements IWebDAVClient {
     return encodeServerUrl(this.settings.serverUrl.replace(/\/$/, ''));
   }
 
-  // Derived by stripping /remote.php/... and everything after it from the WebDAV endpoint URL.
+  // Derived by stripping /remote.php/... or /public.php/... and everything after it from the WebDAV endpoint URL (docs/spec.md §3).
   private serverBaseUrl(): string {
-    return encodeServerUrl(this.settings.serverUrl.replace(/\/remote\.php.*$/, '').replace(/\/$/, ''));
+    return encodeServerUrl(parseServerUrl(this.settings.serverUrl).rootUrl.replace(/\/$/, ''));
   }
 
-  // Base URL for non-files DAV namespaces (versions, uploads).
+  // Base URL for the account-only DAV namespaces (versions, uploads). A public link share has no account behind its
+  // credentials, so building this URL is refused before any request leaves (docs/spec.md §3).
   private davBase(namespace: 'versions' | 'uploads'): string {
+    if (parseServerUrl(this.settings.serverUrl).isPublicShare) {
+      throw new FeatureUnsupportedError(namespace === 'versions' ? 'versions' : 'chunked-upload');
+    }
     return `${this.serverBaseUrl()}/remote.php/dav/${namespace}/${encodeURIComponent(this.settings.username)}`;
   }
 
@@ -120,66 +140,73 @@ export class NextcloudClient implements IWebDAVClient {
   }
 
   async connect(): Promise<NextcloudFeatures> {
-    const statusUrl = this.settings.serverUrl.replace(/\/remote\.php.*$/, '') + '/status.php';
-    const statusRes = await this.reqReadonly({ url: statusUrl, method: 'GET', headers: { ...NO_CACHE_HEADERS }, throw: false });
-    // productname (from /status.php, already parsed here and needing no authentication) is the second detection witness,
-    // useful when a genuine Nextcloud has its OCS endpoint closed off.
-    let statusProductName = '';
-    if (statusRes.status === 200) {
-      const status = statusRes.json as Record<string, unknown>;
-      if (status.maintenance === true) {
-        throw new MaintenanceModeError();
-      }
-      statusProductName = typeof status.productname === 'string' ? status.productname : '';
-    }
+    const { rootUrl, isPublicShare } = parseServerUrl(this.settings.serverUrl);
+    const status = await this.probeStatus(rootUrl);
+    // A public link share authenticates with the share token; sending that to OCS counts as a failed login for the server's
+    // brute-force protection, which then blocks the source IP with 429. So no OCS request is sent for a public share (docs/spec.md §3).
+    const cap = isPublicShare ? NO_CAPABILITIES : await this.probeCapabilities(rootUrl);
+    const syncToken = await this.getSyncToken();
 
-    const capUrl = this.settings.serverUrl.replace(/\/remote\.php.*$/, '') + '/ocs/v1.php/cloud/capabilities?format=json';
-    const capRes = await this.reqReadonly({
-      url: capUrl,
+    // Detection comes from what the probes ANSWERED. Capabilities is the primary witness (every flag derives from it);
+    // the /status.php versionstring is the second, so a genuine Nextcloud with OCS closed off (401/403) or a public share
+    // is not misfiled as plain WebDAV. The product name field is deliberately not read: it can be customised or absent.
+    // Neither answering means WebDAVFactory should use StandardWebDAVClient.
+    const isNextcloud = cap.ocsAnswered || status.versionString !== null;
+
+    this.features = {
+      isNextcloud,
+      version: cap.version || status.versionString || '',
+      hasChecksums: cap.hasChecksums,
+      hasFilesLocking: cap.hasFilesLocking,
+      hasBulkUpload: cap.hasBulkUpload,
+      hasAccountDav: isNextcloud && !isPublicShare,
+      syncToken,
+    };
+    return this.features;
+  }
+
+  /** GET <root>/status.php without credentials. Throws MaintenanceModeError when the server says so; otherwise returns the versionstring witness (null = no witness). */
+  private async probeStatus(rootUrl: string): Promise<{ versionString: string | null }> {
+    const res = await this.reqReadonly({ url: rootUrl + '/status.php', method: 'GET', headers: { ...NO_CACHE_HEADERS }, throw: false });
+    if (res.status !== 200) return { versionString: null };
+    const body = readJsonObject(res);
+    if (body?.maintenance === true) {
+      throw new MaintenanceModeError();
+    }
+    return { versionString: typeof body?.versionstring === 'string' ? body.versionstring : null };
+  }
+
+  /** GET <root>/ocs/v1.php/cloud/capabilities with credentials. Every capability flag derives from this answer. */
+  private async probeCapabilities(rootUrl: string): Promise<{
+    ocsAnswered: boolean;
+    version: string;
+    hasChecksums: boolean;
+    hasFilesLocking: boolean;
+    hasBulkUpload: boolean;
+  }> {
+    const res = await this.reqReadonly({
+      url: rootUrl + '/ocs/v1.php/cloud/capabilities?format=json',
       method: 'GET',
       headers: { Authorization: this.authHeader, 'OCS-APIRequest': 'true', ...NO_CACHE_HEADERS },
       throw: false,
     });
-
-    let version = '';
-    let hasChecksums = false;
-    let hasFilesLocking = false;
-    let hasBulkUpload = false;
-    // Whether OCS actually yielded capabilities: the primary detection witness.
-    let ocsAnswered = false;
-
-    if (capRes.status === 200) {
-      const cap = capRes.json as Record<string, unknown>;
-      const data = (cap as Record<string, Record<string, unknown>>).ocs?.data as Record<string, unknown> | undefined;
-      ocsAnswered = data != null;
-      version = (data?.version as Record<string, string>)?.string ?? '';
-      const caps = data?.capabilities as Record<string, unknown> | undefined;
-      const checksums = caps?.checksums as Record<string, unknown> | undefined;
-      hasChecksums = Array.isArray(checksums?.supportedTypes) && (checksums.supportedTypes as string[]).length > 0;
-      // When the files_lock app is enabled, capabilities.files.locking contains a version string.
-      const files = caps?.files as Record<string, unknown> | undefined;
-      hasFilesLocking = files?.locking != null && files.locking !== false;
-      // capabilities.dav.bulkupload (a version string) when supported; absent => per-file PUT.
-      const dav = caps?.dav as Record<string, unknown> | undefined;
-      hasBulkUpload = dav?.bulkupload != null && dav.bulkupload !== false;
-    }
-
-    const syncToken = await this.getSyncToken();
-
-    // Detection comes from what the probes ANSWERED. Capabilities is the primary witness (every flag above derives from it);
-    // /status.php is the second, so a genuine Nextcloud with OCS closed off (401/403) is not misfiled as plain WebDAV.
-    // Neither answering means WebDAVFactory should use StandardWebDAVClient.
-    const isNextcloud = ocsAnswered || /nextcloud/i.test(statusProductName);
-
-    this.features = {
-      isNextcloud,
-      version,
-      hasChecksums,
-      hasFilesLocking,
-      hasBulkUpload,
-      syncToken,
+    if (res.status !== 200) return NO_CAPABILITIES;
+    const ocs = readJsonObject(res)?.ocs;
+    const data = typeof ocs === 'object' && ocs !== null ? (ocs as Record<string, unknown>).data as Record<string, unknown> | undefined : undefined;
+    const versionString = (data?.version as Record<string, unknown> | undefined)?.string;
+    const caps = data?.capabilities as Record<string, unknown> | undefined;
+    const checksums = caps?.checksums as Record<string, unknown> | undefined;
+    // When the files_lock app is enabled, capabilities.files.locking contains a version string.
+    const files = caps?.files as Record<string, unknown> | undefined;
+    // capabilities.dav.bulkupload (a version string) when supported; absent => per-file PUT.
+    const dav = caps?.dav as Record<string, unknown> | undefined;
+    return {
+      ocsAnswered: data != null,
+      version: typeof versionString === 'string' ? versionString : '',
+      hasChecksums: Array.isArray(checksums?.supportedTypes) && (checksums.supportedTypes as string[]).length > 0,
+      hasFilesLocking: files?.locking != null && files.locking !== false,
+      hasBulkUpload: dav?.bulkupload != null && dav.bulkupload !== false,
     };
-    return this.features;
   }
 
   async getFiles(path: string): Promise<RemoteFileInfo[]> {

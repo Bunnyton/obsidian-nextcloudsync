@@ -99,7 +99,7 @@ async function buildEngine(
   (engine as unknown as { client: unknown }).client = client;
   (engine as unknown as { features: unknown }).features = {
     isNextcloud: true, version: '30.0.0', hasChecksums: true, hasFilesLocking: false,
-    hasBulkUpload: false, syncToken: null,
+    hasBulkUpload: false, hasAccountDav: true, syncToken: null,
   };
   (engine as unknown as { uploadStrategy: unknown }).uploadStrategy = uploadStrategy;
   return { engine, stateDB, baseStore, statusBar };

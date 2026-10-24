@@ -291,9 +291,10 @@ export class SyncEngine {
       const { client, features } = await this.opts.webdavFactory.createClient();
       this.client = client;
       this.features = features;
-      // Chunked upload is gated only by server capability; the threshold is platform-derived (docs/spec.md §15.1.2).
+      // Chunked upload needs the account-only uploads namespace, which a public link share lacks (docs/spec.md §3);
+      // the threshold is platform-derived (docs/spec.md §15.1.2).
       const uploadConfig = { maxFileSizeMB: this.opts.settings.maxFileSizeMB, uploadChunkThresholdMB: chunkThresholdMB(Platform.isMobile) };
-      this.uploadStrategy = (FIXED.chunkedUploadEnabled && features.isNextcloud)
+      this.uploadStrategy = (FIXED.chunkedUploadEnabled && features.isNextcloud && features.hasAccountDav)
         ? new ChunkedUploadStrategy(uploadConfig)
         : new SimpleUploadStrategy(uploadConfig);
       this.opts.onFeatures?.(features);

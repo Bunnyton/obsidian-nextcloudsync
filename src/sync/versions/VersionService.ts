@@ -1,4 +1,4 @@
-// Nextcloud-only: both operations throw FeatureUnsupportedError on other servers (the modal shows it).
+// Nextcloud account URLs only (not public link shares): both operations throw FeatureUnsupportedError elsewhere (the modal shows it).
 // They take no part in a sync session: no summary, no history entry, no merge base.
 import { FileVersion, FeatureUnsupportedError, NextcloudFeatures } from '../../types';
 import { LocalAdapter } from '../../data/LocalAdapter';
@@ -39,9 +39,9 @@ export class VersionService {
     await this.deps.stateDB.save();
   }
 
-  // Versions are addressed by fileId, so a file the state DB has never seen has no history to show.
+  // Versions are addressed by fileId and live in the account-only versions namespace, which a public link share lacks.
   private requireFileId(features: NextcloudFeatures, path: string): string {
-    if (!features.isNextcloud) throw new FeatureUnsupportedError('versions');
+    if (!features.isNextcloud || !features.hasAccountDav) throw new FeatureUnsupportedError('versions');
     const fileId = this.deps.stateDB.getFile(path)?.remoteFileId;
     if (!fileId) throw new FeatureUnsupportedError('versions');
     return fileId;
