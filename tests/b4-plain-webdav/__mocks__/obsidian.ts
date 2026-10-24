@@ -193,6 +193,7 @@ export function normalizePath(path: string): string {
 }
 
 // Mutable platform flags so tests can simulate desktop / iOS / Android.
+export const apiVersion = '1.13.7';
 export const Platform = {
   isMobile: false,
   isDesktop: true,

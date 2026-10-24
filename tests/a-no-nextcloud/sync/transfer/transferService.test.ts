@@ -12,11 +12,12 @@ import {
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { IUploadStrategy } from '../../../../src/sync/upload/IUploadStrategy';
 import { sha256 } from '../../../../src/util/hash';
+import { passThroughLocalWrite } from '../../support/pluginPorts';
 
 function summary(): SyncSessionSummary {
   return {
     startedAt: 0, completedAt: null, uploadedCount: 0, downloadedCount: 0, deletedCount: 0,
-    mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], errors: [],
+    mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], pluginsNeedingRestart: [], errors: [],
   };
 }
 
@@ -89,6 +90,7 @@ function build(o: Opts = {}, over: Partial<TransferDeps> = {}) {
       getFile: () => o.base,
       setFile: (f: FileState) => { calls.setFile.push(f); },
     } as unknown as TransferDeps['stateDB'],
+    localWrite: passThroughLocalWrite,
     journal: Object.assign(new SyncJournal({}), {
       recordHistory: (p: string, op: string) => { calls.history.push(`${op}:${p}`); },
     }) as unknown as SyncJournal,
@@ -276,5 +278,39 @@ describe('TransferService.downloadFile', () => {
     await transfer.downloadFile(client, remote({ size: 1, lastModified: 0 }), 'rid', 'etag', summary());
     expect(calls.writeMtime).toEqual([undefined]);
     expect(calls.writeMtime[0]).toBeUndefined();
+  });
+});
+
+describe('[SPEC:CPS-19] downloadFile writes through LocalWritePort', () => {
+  const fakePort = () => ({ mtimeFor: jest.fn(() => 42), written: jest.fn() });
+
+  it('writes with the mtime the port chooses and reports the write once, after it', async () => {
+    const body = new TextEncoder().encode('remote body').buffer;
+    const localWrite = fakePort();
+    const { transfer, client, calls } = build({ remoteBody: body }, { localWrite });
+    const r = remote({ size: body.byteLength, lastModified: 2000 });
+    localWrite.written.mockImplementation(() => { expect(calls.wrote).toEqual(['note.md']); });
+    await transfer.downloadFile(client, r, 'rid', 'etag', summary());
+    expect(localWrite.mtimeFor).toHaveBeenCalledWith('note.md', 2000);
+    expect(calls.writeMtime).toEqual([42]);
+    expect(localWrite.written).toHaveBeenCalledTimes(1);
+    expect(localWrite.written).toHaveBeenCalledWith('note.md');
+  });
+
+  it('passes undefined to the port when the server gave no mtime', async () => {
+    const body = new TextEncoder().encode('b').buffer;
+    const localWrite = fakePort();
+    const { transfer, client } = build({ remoteBody: body }, { localWrite });
+    await transfer.downloadFile(client, remote({ size: 1, lastModified: 0 }), 'rid', 'etag', summary());
+    expect(localWrite.mtimeFor).toHaveBeenCalledWith('note.md', undefined);
+  });
+
+  it('does not report a write when the local file already has the same content', async () => {
+    const body = new TextEncoder().encode('same').buffer;
+    const localWrite = fakePort();
+    const { transfer, client, calls } = build({ remoteBody: body, localContent: 'same' }, { localWrite });
+    await transfer.downloadFile(client, remote({ size: body.byteLength }), 'rid', 'etag', summary());
+    expect(calls.wrote).toEqual([]);
+    expect(localWrite.written).toHaveBeenCalledTimes(0);
   });
 });

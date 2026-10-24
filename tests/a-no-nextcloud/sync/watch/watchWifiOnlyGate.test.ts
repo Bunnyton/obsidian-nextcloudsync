@@ -2,6 +2,7 @@
 import { WatchOperations, WatchDeps } from '../../../../src/sync/watch/WatchOperations';
 import { SyncJournal } from '../../../../src/sync/session/SyncJournal';
 import type { FileState } from '../../../../src/types';
+import { noPluginPath } from '../../support/pluginPorts';
 
 interface Harness {
   watch: WatchOperations;
@@ -59,7 +60,7 @@ function build(opts: { blocked: boolean; running?: boolean }): Harness {
 
   const deps = {
     localAdapter, stateDB, historyStore, statusBar, journal, mergeBase, transfer, deletion, resolution,
-    isSystemExcluded, connect, renameTracker, isBlockedByWifiOnly, isSyncRunning, processFile,
+    isSystemExcluded, isPluginPath: noPluginPath, connect, renameTracker, isBlockedByWifiOnly, isSyncRunning, processFile,
     queueRetry, conflictEncounters, logger, notify,
   } as unknown as WatchDeps;
 

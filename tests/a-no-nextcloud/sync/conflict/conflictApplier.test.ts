@@ -14,11 +14,13 @@ import { MergeConfig } from '../../../../src/sync/ConflictResolver';
 import { FileState, RemoteFileInfo, SyncSessionSummary } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { IUploadStrategy } from '../../../../src/sync/upload/IUploadStrategy';
+import { passThroughLocalWrite, noPluginConflictRule } from '../../support/pluginPorts';
+import type { PluginConflictRule } from '../../../../src/sync/plugins/PluginSyncCoordinator';
 
 function summary(): SyncSessionSummary {
   return {
     startedAt: 0, completedAt: null, uploadedCount: 0, downloadedCount: 0, deletedCount: 0,
-    mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], errors: [],
+    mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], pluginsNeedingRestart: [], errors: [],
   };
 }
 
@@ -71,6 +73,7 @@ function build(o: Opts = {}, over: Partial<ConflictDeps> = {}) {
     captured: [] as string[],
     rootEtag: [] as Array<string | null>,
     conflicts: 0,
+    reads: 0,
     warned: [] as string[],
   };
 
@@ -90,7 +93,7 @@ function build(o: Opts = {}, over: Partial<ConflictDeps> = {}) {
     app: {} as unknown as ConflictDeps['app'],
     localAdapter: {
       stat: async () => ({ size: local.size, mtime: local.mtime }),
-      read: async () => onDisk,
+      read: async () => { calls.reads++; return onDisk; },
       readBinary: async () => new TextEncoder().encode(onDisk).buffer,
       atomicWrite: async (p: string, c: string, mtime?: number) => {
         calls.wrote.push(p); calls.wroteMtime.push(mtime); onDisk = c;
@@ -121,6 +124,8 @@ function build(o: Opts = {}, over: Partial<ConflictDeps> = {}) {
     resolution: {
       captureCleanSides: (p: string) => { calls.captured.push(p); },
     } as unknown as ResolutionService,
+    localWrite: passThroughLocalWrite,
+    pluginConflictRule: noPluginConflictRule,
     resolverConfig: () => ({ ...CONFIG, ...o.config }),
     maxFileSizeMB: () => 100,
     queueRetry: (p: string) => { calls.retries.push(p); },
@@ -436,5 +441,87 @@ describe('ConflictApplier.resolveByPreferLocal / resolveByPreferRemote — failu
     expect(s.errorCount).toBe(1);
     expect(calls.setFile).toEqual([]);
     expect(calls.retries).toEqual(['note.md']);
+  });
+});
+
+describe('[SPEC:CPS-6] plugin conflict rules', () => {
+  const PLUGIN_JS = '.obsidian/plugins/p/main.js';
+  const PLUGIN_DATA = '.obsidian/plugins/p/data.json';
+  const MERGE_CONFIG: Partial<MergeConfig> = { autoMergeFileTypes: ['md', 'js', 'json'], otherFileStrategy: 'latest-mtime' };
+  const LOCAL = 'shared\nlocal line\n';
+  const REMOTE = 'shared\nremote line\n';
+
+  function run(path: string, rule: PluginConflictRule | null, localMtime: number, extra: Partial<ConflictDeps> = {}) {
+    const h = build(
+      { config: MERGE_CONFIG, local: { content: LOCAL, mtime: localMtime, size: 11 }, remoteBody: REMOTE },
+      { pluginConflictRule: () => rule, ...extra },
+    );
+    const remote = remoteInfo({ path, size: REMOTE.length, lastModified: 2000 });
+    return { ...h, remote, s: summary() };
+  }
+
+  it('1. force prefer-remote writes the remote body locally even when local is newer', async () => {
+    const { applier, conn, calls, remote, s, diskContent } = run(PLUGIN_JS, { kind: 'force', action: 'prefer-remote' }, 5000);
+    await applier.handleConflict(conn, PLUGIN_JS, base(PLUGIN_JS), remote, 'r', 'etag', s);
+    expect(calls.wroteBinary).toEqual([PLUGIN_JS]);
+    expect(diskContent()).toBe(REMOTE);
+  });
+
+  it('2. force prefer-local uploads even when local is older', async () => {
+    const { applier, conn, calls, remote, s, diskContent } = run(PLUGIN_JS, { kind: 'force', action: 'prefer-local' }, 1000);
+    await applier.handleConflict(conn, PLUGIN_JS, base(PLUGIN_JS), remote, 'r', 'etag', s);
+    expect(calls.uploadMtime).toHaveLength(1);
+    // The local body is pushed as is: nothing is merged or written locally.
+    expect(calls.wrote).toEqual([]);
+    expect(calls.wroteBinary).toEqual([]);
+    expect(diskContent()).toBe(LOCAL);
+  });
+
+  it('3. force safe-hold flags a tracked file conflicted and writes nothing for an untracked one', async () => {
+    const tracked = run(PLUGIN_JS, { kind: 'force', action: 'safe-hold' }, 1000);
+    await tracked.applier.handleConflict(tracked.conn, PLUGIN_JS, base(PLUGIN_JS), tracked.remote, 'r', 'etag', tracked.s);
+    expect(tracked.calls.setFile).toHaveLength(1);
+    expect(tracked.calls.setFile[0]).toMatchObject({ isConflicted: true });
+    expect(tracked.s.conflictedCount).toBe(1);
+
+    const untracked = run(PLUGIN_JS, { kind: 'force', action: 'safe-hold' }, 1000);
+    await untracked.applier.handleConflict(untracked.conn, PLUGIN_JS, undefined, untracked.remote, 'r', 'etag', untracked.s);
+    expect(untracked.calls.setFile).toEqual([]);
+  });
+
+  it('4. strategy latest-mtime on main.js takes the newer remote without reading the local body', async () => {
+    const { applier, conn, calls, remote, s, diskContent } = run(PLUGIN_JS, { kind: 'strategy', strategy: 'latest-mtime' }, 1000);
+    await applier.handleConflict(conn, PLUGIN_JS, base(PLUGIN_JS), remote, 'r', 'etag', s);
+    expect(calls.wroteBinary).toEqual([PLUGIN_JS]);
+    expect(diskContent()).toBe(REMOTE);
+    expect(calls.reads).toBe(0);
+  });
+
+  it('5. data.json follows otherFileStrategy and never gets conflict markers', async () => {
+    const rule: PluginConflictRule = { kind: 'strategy', strategy: 'latest-mtime' };
+    const { applier, conn, remote, s, diskContent } = run(PLUGIN_DATA, rule, 1000);
+    await applier.handleConflict(conn, PLUGIN_DATA, base(PLUGIN_DATA), remote, 'r', 'etag', s);
+    expect(diskContent()).not.toContain('<<<<<<<');
+    expect(diskContent()).toBe(REMOTE);
+  });
+
+  it('6. a non-plugin .js file with no rule still goes through the merge path', async () => {
+    const { applier, conn, calls, remote, s } = run('notes/a.js', null, 1000);
+    await applier.handleConflict(conn, 'notes/a.js', base('notes/a.js'), remote, 'r', 'etag', s);
+    expect(calls.wrote).toEqual(['notes/a.js']);
+    expect(calls.wroteBinary).toEqual([]);
+  });
+
+  it('prefer-remote takes its mtime from localWrite and reports the write', async () => {
+    const mtimeFor = jest.fn((_p: string, _m: number | undefined) => 4242);
+    const written = jest.fn();
+    const { applier, conn, calls, remote, s } = run(
+      PLUGIN_JS, { kind: 'force', action: 'prefer-remote' }, 5000, { localWrite: { mtimeFor, written } },
+    );
+    await applier.handleConflict(conn, PLUGIN_JS, base(PLUGIN_JS), remote, 'r', 'etag', s);
+    expect(mtimeFor).toHaveBeenCalledWith(PLUGIN_JS, 2000);
+    expect(calls.wroteBinaryMtime).toEqual([4242]);
+    expect(written).toHaveBeenCalledTimes(1);
+    expect(written).toHaveBeenCalledWith(PLUGIN_JS);
   });
 });

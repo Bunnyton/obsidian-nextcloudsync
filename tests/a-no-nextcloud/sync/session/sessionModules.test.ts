@@ -11,6 +11,7 @@ import {
 } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { LocalAdapter } from '../../../../src/data/LocalAdapter';
+import { noPluginPath } from '../../support/pluginPorts';
 
 interface Recorded {
   path: string; op: SyncFileOp; at: number;
@@ -75,7 +76,7 @@ describe('SyncJournal — recording errors', () => {
   function summary(): SyncSessionSummary {
     return {
       startedAt: 0, completedAt: null, uploadedCount: 0, downloadedCount: 0, deletedCount: 0,
-      mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], errors: [],
+      mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], pluginsNeedingRestart: [], errors: [],
     };
   }
 
@@ -144,7 +145,7 @@ describe('SyncJournal.newSummary', () => {
     const s = j.newSummary();
     expect(s).toMatchObject({
       completedAt: null, uploadedCount: 0, downloadedCount: 0, deletedCount: 0,
-      mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], errors: [],
+      mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], pluginsNeedingRestart: [], errors: [],
     });
     expect(s.startedAt).toBeGreaterThan(0);
   });
@@ -169,6 +170,7 @@ describe('MergeBaseRecorder — which files get a base', () => {
           requestSave: () => { saves.count++; },
         } as never : undefined,
         autoMergeFileTypes: () => types,
+        isPluginPath: noPluginPath,
       }),
       store, saves,
     };
@@ -199,6 +201,7 @@ describe('MergeBaseRecorder — which files get a base', () => {
     const rec = new MergeBaseRecorder({
       baseStore: { set: () => { /* noop */ }, delete: () => { /* noop */ }, requestSave: () => { /* noop */ } } as never,
       autoMergeFileTypes: () => types,
+      isPluginPath: noPluginPath,
     });
     // A settings change between syncs must take effect without rebuilding the recorder.
     expect(() => { types = ['md']; rec.record('a.md', 'x'); }).not.toThrow();
@@ -215,6 +218,34 @@ describe('MergeBaseRecorder — which files get a base', () => {
   it('no-ops entirely when no store is injected', () => {
     const { rec } = recorder(['md'], false);
     expect(() => { rec.record('a.md', 'x'); rec.drop('a.md'); }).not.toThrow();
+  });
+});
+
+describe('[SPEC:CPS-6] MergeBaseRecorder skips plugin files', () => {
+  function pluginRecorder() {
+    const store = new Map<string, string>();
+    const rec = new MergeBaseRecorder({
+      baseStore: {
+        set: (p: string, c: string) => { store.set(p, c); },
+        delete: (p: string) => { store.delete(p); },
+        requestSave: () => undefined,
+      } as never,
+      autoMergeFileTypes: () => ['js', 'md'],
+      isPluginPath: (p: string) => p.startsWith('.obsidian/plugins/'),
+    });
+    return { rec, store };
+  }
+
+  it('records no base for a plugin file, even for an auto-merge type', () => {
+    const { rec, store } = pluginRecorder();
+    rec.record('.obsidian/plugins/p/main.js', 'x');
+    expect(store.size).toBe(0);
+  });
+
+  it('still records a base for a non-plugin file of the same type', () => {
+    const { rec, store } = pluginRecorder();
+    rec.record('notes/a.js', 'x');
+    expect(store.get('notes/a.js')).toBe('x');
   });
 });
 

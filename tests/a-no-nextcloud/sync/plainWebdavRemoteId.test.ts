@@ -9,6 +9,7 @@ import { SyncJournal } from '../../../src/sync/session/SyncJournal';
 import { MergeBaseRecorder } from '../../../src/sync/session/MergeBaseRecorder';
 import { IWebDAVClient } from '../../../src/network/IWebDAVClient';
 import { IUploadStrategy } from '../../../src/sync/upload/IUploadStrategy';
+import { passThroughLocalWrite } from '../support/pluginPorts';
 import {
   DEFAULT_SETTINGS, FileState, RemoteFileInfo, SyncSessionSummary,
 } from '../../../src/types';
@@ -32,7 +33,7 @@ function memoryAdapter(): DataAdapter {
 
 const summary = (): SyncSessionSummary => ({
   startedAt: 0, completedAt: null, uploadedCount: 0, downloadedCount: 0, deletedCount: 0,
-  mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], errors: [],
+  mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], pluginsNeedingRestart: [], errors: [],
 });
 
 // A remote file as the plain client reports it: an ETag and always a null checksum.
@@ -53,6 +54,7 @@ async function recordAfterUpload(
       readBinary: async () => new TextEncoder().encode(BODY).buffer,
     },
     stateDB,
+    localWrite: passThroughLocalWrite,
     journal: new SyncJournal({}) as unknown as SyncJournal,
     mergeBase: { record: () => undefined, drop: () => undefined } as unknown as MergeBaseRecorder,
     maxFileSizeMB: () => 0,

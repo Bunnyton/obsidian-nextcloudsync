@@ -29,7 +29,7 @@ export class SyncJournal {
       startedAt: Date.now(), completedAt: null,
       uploadedCount: 0, downloadedCount: 0, deletedCount: 0,
       mergedCount: 0, conflictedCount: 0,
-      errorCount: 0, retriedFiles: [], errors: [],
+      errorCount: 0, retriedFiles: [], pluginsNeedingRestart: [], errors: [],
     };
   }
 

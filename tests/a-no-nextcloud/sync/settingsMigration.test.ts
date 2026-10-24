@@ -1,4 +1,4 @@
-import { migrateBookmarksToConfigSync, migrateStartupToggleToDelay, migrateConflictSettingsToStrategies, migrateFrontmatterScalarPolicyToStrategy, migrateMarkdownAutoMergeType, pruneObsoleteSettings, resetDebugIdentityFields } from '../../../src/util/settingsMigration';
+import { migrateBookmarksToConfigSync, migrateStartupToggleToDelay, migrateConflictSettingsToStrategies, migrateFrontmatterScalarPolicyToStrategy, migrateMarkdownAutoMergeType, pruneObsoleteSettings, resetDebugIdentityFields, normalizePluginIdList, normalizeSyncedCommunityPlugins } from '../../../src/util/settingsMigration';
 import { DEFAULT_SETTINGS, DavSyncSettings } from '../../../src/types';
 
 function freshSettings(): DavSyncSettings {
@@ -311,5 +311,44 @@ describe('[SPEC:FX-1] feature 033 — the five removed settings are pruned (self
     const clean = { ...DEFAULT_SETTINGS } as unknown as Record<string, unknown>;
     const removed = pruneObsoleteSettings(clean);
     for (const key of REMOVED) expect(removed).not.toContain(key);
+  });
+});
+
+describe('[SPEC:CPS-3] syncedCommunityPlugins normalization', () => {
+  const ownId = 'nextcloud-sync';
+
+  it.each([undefined, null, 'dataview', {}])('normalizePluginIdList(%j) = []', (value) => {
+    expect(normalizePluginIdList(value, ownId)).toEqual([]);
+  });
+
+  it('drops non-strings, invalid ids, the own id and duplicates, and sorts', () => {
+    expect(normalizePluginIdList(['b', 'a', 'a', 7, null, '', '../x', '.x', 'x/y', 'nextcloud-sync'], ownId))
+      .toEqual(['a', 'b']);
+  });
+
+  it('sorts with the default sort order', () => {
+    expect(normalizePluginIdList(['B', 'a'], ownId)).toEqual(['B', 'a']);
+  });
+
+  it('is idempotent', () => {
+    const once = normalizePluginIdList(['z', 'a', 'a', '.x'], ownId);
+    expect(normalizePluginIdList(once, ownId)).toEqual(once);
+  });
+
+  it('normalizeSyncedCommunityPlugins assigns a new array', () => {
+    const s = freshSettings();
+    const original = ['b', 'a'];
+    s.syncedCommunityPlugins = original;
+    normalizeSyncedCommunityPlugins(s, ownId);
+    expect(s.syncedCommunityPlugins).toEqual(['a', 'b']);
+    expect(s.syncedCommunityPlugins).not.toBe(original);
+  });
+
+  it('keeps DEFAULT_SETTINGS.syncedCommunityPlugins empty, also after normalizing a copy', () => {
+    expect(DEFAULT_SETTINGS.syncedCommunityPlugins).toEqual([]);
+    const s = { ...DEFAULT_SETTINGS };
+    normalizeSyncedCommunityPlugins(s, ownId);
+    expect(DEFAULT_SETTINGS.syncedCommunityPlugins).toEqual([]);
+    expect(s.syncedCommunityPlugins).not.toBe(DEFAULT_SETTINGS.syncedCommunityPlugins);
   });
 });

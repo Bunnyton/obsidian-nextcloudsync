@@ -131,6 +131,9 @@ importers:
       reconcile-text:
         specifier: ^0.12.1
         version: 0.12.1
+      semver:
+        specifier: 7.8.5
+        version: 7.8.5
     devDependencies:
       '@eslint-community/eslint-plugin-eslint-comments':
         specifier: ^4.7.2
@@ -150,6 +153,9 @@ importers:
       '@types/node':
         specifier: ^26.4.1
         version: 26.4.1
+      '@types/semver':
+        specifier: ^7.8.0
+        version: 7.8.0
       '@wdio/appium-service':
         specifier: ^9.31.6
         version: 9.31.6(supports-color@8.1.1)(yauzl@3.4.0)
@@ -1403,6 +1409,9 @@ packages:
 
   '@types/normalize-package-data@2.4.4':
     resolution: {integrity: sha512-37i+OaWTh9qeK4LSHPsyRC7NahnGotNuZvjLSgcPzblpHB3rrCJxAOgI5gCdKm7coonsaX1Of0ILiTcnZjbfxA==}
+
+  '@types/semver@7.8.0':
+    resolution: {integrity: sha512-1mAINjtQCXXeLkJ9ehXkwOcBpqtLxiVtKhpUf83DdRNdQKV0iXZpaHYqRr7nj+wvxuJzoAmAwXI+sCNMv1CzLQ==}
 
   '@types/sinonjs__fake-timers@8.1.5':
     resolution: {integrity: sha512-mQkU2jY8jJEF7YHjHvsQO8+3ughTL1mcnn96igfhONmR+fUPSKIkefQYpSe8bsly2Ep7oQbn/6VG5/9/0qcArQ==}
@@ -6536,6 +6545,8 @@ snapshots:
       undici-types: 8.3.0
 
   '@types/normalize-package-data@2.4.4': {}
+
+  '@types/semver@7.8.0': {}
 
   '@types/sinonjs__fake-timers@8.1.5': {}
 

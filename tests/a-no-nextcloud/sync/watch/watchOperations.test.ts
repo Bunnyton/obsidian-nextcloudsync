@@ -16,6 +16,7 @@ import { RenameTracker } from '../../../../src/sync/RenameTracker';
 import { FileState, RemoteFileInfo, SyncSessionSummary, NetworkError } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { IUploadStrategy } from '../../../../src/sync/upload/IUploadStrategy';
+import { noPluginPath } from '../../support/pluginPorts';
 
 const remote = (over: Partial<RemoteFileInfo> = {}): RemoteFileInfo => ({
   path: 'note.md', fileId: 'fid', checksum: null, etag: '"e"', size: 10, lastModified: 2000, ...over,
@@ -122,6 +123,7 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
       dropCleanSnapshot: (p: string) => { calls.droppedSnap.push(p); },
     } as unknown as ResolutionService,
     isSystemExcluded: () => false,
+    isPluginPath: noPluginPath,
     connect: async () => ({ client, uploadStrategy: {} as unknown as IUploadStrategy }),
     renameTracker: () => ({
       applyLocalRename: async (a: string, b: string) => {
@@ -380,5 +382,74 @@ describe('WatchOperations — the status bar', () => {
     const { watch, calls } = build({ running: true, trackedDirs: ['Old'] });
     await watch.deleteSingleFolder('Old');
     expect(calls.status).toEqual([]);
+  });
+});
+
+describe('[SPEC:CPS-7] watch never handles plugin paths', () => {
+  const isPluginPath = (p: string) => p.startsWith('.obsidian/plugins');
+  const PLUGIN = '.obsidian/plugins/p/main.js';
+  const PLUGIN_DIR = '.obsidian/plugins/p';
+
+  function guarded() {
+    let connects = 0;
+    const connect = async () => { connects++; return { client: {} as unknown as IWebDAVClient, uploadStrategy: {} as unknown as IUploadStrategy }; };
+    const built = build({ localContent: 'x', trackedDirs: [PLUGIN_DIR, 'Old'] }, { isPluginPath, connect });
+    const untouched = () => {
+      const c = built.calls;
+      expect(connects).toBe(0);
+      expect([c.statCalls, c.readCalls, c.saves]).toEqual([0, 0, 0]);
+      expect([c.processed, c.uploaded, c.deleted, c.deleteFile, c.setDir, c.deleteDir, c.stats, c.history,
+        c.createDirectory, c.deleteCollection, c.move, c.renames, c.droppedBase, c.droppedSnap]).toEqual(
+        Array.from({ length: 14 }, () => []));
+    };
+    return { watch: built.watch, untouched };
+  }
+
+  it('syncSingleFile ignores a plugin file', async () => {
+    const { watch, untouched } = guarded();
+    await watch.syncSingleFile(PLUGIN);
+    untouched();
+  });
+
+  it('deleteSingleFile ignores a plugin file', async () => {
+    const { watch, untouched } = guarded();
+    await watch.deleteSingleFile(PLUGIN);
+    untouched();
+  });
+
+  it('renameSingleFile ignores a rename whose old path is a plugin path', async () => {
+    const { watch, untouched } = guarded();
+    await watch.renameSingleFile(PLUGIN, 'notes/a.js');
+    untouched();
+  });
+
+  it('renameSingleFile ignores a rename whose new path is a plugin path', async () => {
+    const { watch, untouched } = guarded();
+    await watch.renameSingleFile('notes/a.js', PLUGIN);
+    untouched();
+  });
+
+  it('createSingleFolder ignores a plugin folder', async () => {
+    const { watch, untouched } = guarded();
+    await watch.createSingleFolder(PLUGIN_DIR);
+    untouched();
+  });
+
+  it('deleteSingleFolder ignores a tracked plugin folder', async () => {
+    const { watch, untouched } = guarded();
+    await watch.deleteSingleFolder(PLUGIN_DIR);
+    untouched();
+  });
+
+  it('renameSingleFolder ignores a rename whose old path is a plugin path', async () => {
+    const { watch, untouched } = guarded();
+    await watch.renameSingleFolder(PLUGIN_DIR, 'Old2');
+    untouched();
+  });
+
+  it('renameSingleFolder ignores a rename whose new path is a plugin path', async () => {
+    const { watch, untouched } = guarded();
+    await watch.renameSingleFolder('Old', '.obsidian/plugins/q');
+    untouched();
   });
 });

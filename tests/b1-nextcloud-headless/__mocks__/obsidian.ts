@@ -192,6 +192,7 @@ export function normalizePath(path: string): string {
   return path.replace(/\\/g, '/').replace(/\/+/g, '/');
 }
 
+export const apiVersion = '1.13.7';
 export const Platform = {
   isMobile: false,
   isDesktop: true,

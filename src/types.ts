@@ -80,9 +80,11 @@ export interface DavSyncSettings {
    * -1 = automatic max(20, 20% of tracked files); 0 = unlimited (risky); N > 0 = fixed limit.
    */
   massDeleteLimit: number;
-  /** Master opt-in for syncing the Obsidian config folder; community plugins and this plugin's state DB are never synced. */
+  /** Master opt-in for syncing the Obsidian config folder; this plugin's own folder is never synced, and community plugins sync only for the IDs in `syncedCommunityPlugins`. */
   syncConfigFolder: boolean;
   configSync: ConfigSyncCategories;
+  /** Per-device allow list of community plugin IDs to sync; normalized by `normalizeSyncedCommunityPlugins`. Always assign a fresh array. */
+  syncedCommunityPlugins: string[];
   /** Device label; empty derives `<platform>-<deviceId6>`. */
   deviceName: string;
   /** Vault-relative log folder; blank = vault root. */
@@ -130,6 +132,7 @@ export const DEFAULT_SETTINGS: DavSyncSettings = {
     bookmarks: true,
     others: true,
   },
+  syncedCommunityPlugins: [],
   deviceName: '',
   logsFolder: '',
   loggingEnabled: false,
@@ -190,6 +193,8 @@ export interface SyncState {
   remoteRootEtag?: string | null;
   /** Consecutive short-circuited scans since the last real one (bounded by FORCE_FULL_SCAN_EVERY). */
   fullScanSkipCount?: number;
+  /** Fingerprint of the sync scope at the last sync; absent in older state files (treated as changed). */
+  syncScopeFingerprint?: string;
 }
 
 export interface NextcloudFeatures {
@@ -320,6 +325,8 @@ export interface SyncSessionSummary {
   conflictedCount: number;
   errorCount: number;
   retriedFiles: string[];
+  /** Sorted IDs of enabled plugins whose code was written locally this session; they need a restart. */
+  pluginsNeedingRestart: string[];
   /** Per-error details behind errorCount, shown in the sync status dialog. */
   errors: SyncErrorDetail[];
 }

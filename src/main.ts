@@ -17,7 +17,10 @@ import { isSyncTmpPath, LocalAdapter } from './data/LocalAdapter';
 import type { MergeBaseStore } from './data/MergeBaseStore';
 import { v4 as uuidv4 } from './util/uuid';
 import { hostToken, LogPlatform } from './util/hostToken';
-import { migrateConfigSyncCategories, migrateBookmarksToConfigSync, migrateStartupToggleToDelay, migrateConflictSettingsToStrategies, migrateFrontmatterScalarPolicyToStrategy, migrateMarkdownAutoMergeType, pruneObsoleteSettings, resetDebugIdentityFields, applyMobileFirstRunDefaults } from './util/settingsMigration';
+import { migrateConfigSyncCategories, migrateBookmarksToConfigSync, migrateStartupToggleToDelay, migrateConflictSettingsToStrategies, migrateFrontmatterScalarPolicyToStrategy, migrateMarkdownAutoMergeType, pruneObsoleteSettings, resetDebugIdentityFields, applyMobileFirstRunDefaults, normalizeSyncedCommunityPlugins } from './util/settingsMigration';
+import { CommunityPluginPickerModal } from './ui/CommunityPluginPickerModal';
+import { applyPluginSelection, type PluginSelectionConfirmStep } from './ui/pluginSelection';
+import { collectCommunityPluginCandidates, type PluginCandidateList } from './sync/plugins/candidates';
 import { debugLogPath, isActiveOwnLog } from './util/logPaths';
 import { autoNetworkConcurrency } from './util/platformDefaults';
 
@@ -53,6 +56,9 @@ export default class ObsidianNextcloudsync extends Plugin {
   // Last user edit time per path, to keep sync from writing under the cursor. Not the debounce's
   // pending set: that is cleared when the debounce fires, exactly when the triggered sync begins.
   private readonly lastLocalEdit = new Map<string, number>();
+  // Plugin ids whose code was written and that still need an Obsidian restart. Held here, not in the engine,
+  // so it survives the engine being rebuilt.
+  private readonly pluginsAwaitingRestart = new Set<string>();
 
   async onload(): Promise<void> {
     const currentVersion = (this.app as App & { appVersion?: string }).appVersion ?? '';
@@ -449,6 +455,8 @@ export default class ObsidianNextcloudsync extends Plugin {
     // Device name and log folder are no longer user-settable: force both back to their sentinels.
     const debugReset = resetDebugIdentityFields(saved, this.settings);
 
+    normalizeSyncedCommunityPlugins(this.settings, this.manifest.id);
+
     // Persist the cleaned settings so data.json no longer carries obsolete keys or a stale Debug identity.
     const removed = pruneObsoleteSettings(this.settings as unknown as Record<string, unknown>);
     if (removed.length > 0 || debugReset) {
@@ -457,7 +465,44 @@ export default class ObsidianNextcloudsync extends Plugin {
   }
 
   async saveSettings(): Promise<void> {
+    normalizeSyncedCommunityPlugins(this.settings, this.manifest.id);
     await this.saveData(this.settings);
+  }
+
+  // Opens the community plugin picker; `onChanged` runs after a confirmed selection is saved.
+  openCommunityPluginPicker(onChanged: () => void): void {
+    const load = (): Promise<PluginCandidateList> => this.syncEngine
+      ? this.syncEngine.listCommunityPluginCandidates()
+      : collectCommunityPluginCandidates({
+        localAdapter: new LocalAdapter(this.app.vault.adapter),
+        client: null,
+        configDir: this.app.vault.configDir,
+        ownId: this.manifest.id,
+        isMobile: Platform.isMobile,
+      });
+    const confirm = (step: PluginSelectionConfirmStep): Promise<boolean> => confirmModal(this.app, step.kind === 'risk'
+      ? {
+        title: 'Dangerous: sync community plugin code',
+        message: 'Synced plugins run their code on every device that lists them. A malicious or broken plugin on one device spreads to the others, and different plugin versions on two devices can corrupt that plugin\'s settings. Continue only if you trust these plugins.',
+        cta: 'I understand the risk',
+        cancel: 'Cancel',
+        destructive: true,
+      }
+      : {
+        title: 'Start syncing these plugins?',
+        message: `These community plugins will be synced on this device: ${step.added.join(', ')}. Their code and settings will be uploaded to and downloaded from the server.`,
+        cta: 'Sync these plugins',
+        cancel: 'Cancel',
+        destructive: true,
+      });
+    const apply = async (chosen: string[]): Promise<void> => {
+      const result = await applyPluginSelection(this.settings.syncedCommunityPlugins, chosen, this.manifest.id, confirm);
+      if (result === null) return;
+      this.settings.syncedCommunityPlugins = result;
+      await this.saveSettings();
+      onChanged();
+    };
+    new CommunityPluginPickerModal(this.app, { load, current: this.settings.syncedCommunityPlugins, apply }).open();
   }
 
   // Re-entrant-safe: a call arriving during an in-flight init awaits that same promise. A fresh init
@@ -522,6 +567,7 @@ export default class ObsidianNextcloudsync extends Plugin {
       webdavFactory,
       pluginDir,
       configDir: this.app.vault.configDir,
+      pluginsAwaitingRestart: this.pluginsAwaitingRestart,
       // Evaluated live from the same settings and host token as the logger, so it follows the logging
       // toggle (docs/spec.md §9.1).
       isBeingEdited: (path) => this.isBeingEdited(path),
