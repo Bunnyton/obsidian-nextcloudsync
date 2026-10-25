@@ -102,6 +102,7 @@ function build(o: Opts = {}, over: Partial<TransferDeps> = {}) {
     }) as unknown as SyncJournal,
     mergeBase: {
       record: (p: string) => { calls.mergeBase.push(p); },
+      recordBytes: (p: string) => { calls.mergeBase.push(p); },
       drop: () => { /* noop */ },
     } as unknown as MergeBaseRecorder,
     maxFileSizeMB: () => (o.oversize ? 0.000001 : 100),

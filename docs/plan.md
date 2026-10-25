@@ -576,7 +576,7 @@ separate modules. `SyncEngine.ts` keeps orchestration and the per-file decision;
 | `src/sync/scan/LocalScanner.ts` | `scanLocalFiles` / `collectLocalStats` (dot-path completion inside) | Class (dependency injection) |
 | `src/sync/scan/RemoteListingSource.ts` | `obtainFullScanListing` (root-ETag short-circuit) / `rebuildRemote*FromState` / `resolveRemoteChecksums` | Class |
 | `src/sync/session/SyncJournal.ts` | Summary creation, history recording, error recording, log output of session errors | Class (**owns the run start time**) |
-| `src/sync/session/MergeBaseRecorder.ts` | Decision on whether a merge base may be recorded, and the save request | Class |
+| `src/sync/session/MergeBaseRecorder.ts` | Decision on whether a merge base may be recorded (made before a byte body is decoded), and the save request | Class |
 | `src/data/localSignature.ts` | Stamping the post-write stat signature (`withLocalSignature`) | Free function |
 | `src/sync/transfer/TransferService.ts` | Single `uploadFile` / `downloadFile`, locking, size guard | Class (**owns the held locks**) |
 | `src/sync/versions/VersionService.ts` | Nextcloud version listing and restore | Class |

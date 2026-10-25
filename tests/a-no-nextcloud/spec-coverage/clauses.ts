@@ -296,6 +296,8 @@ export const CLAUSES: Clause[] = [
   { id: 'MB-12', source: 'specs/038-merge-base-store (MergeBaseStore persistence round-trip)', layer: 'a' },
   { id: 'MB-13', source: 'specs/038-merge-base-store (base/file mismatch converges next sync; guard is the backstop)', layer: 'a', waiver: 'crash-consistency convergence covered by MB-3/MB-4 self-healing; no separate forced-crash harness' },
   { id: 'MB-14', source: 'specs/038-merge-base-store (no new DavSyncSettings key)', layer: 'a' },
+  { id: 'MB-15', source: 'docs/spec.md §6.2 (a file that keeps no merge base is never decoded to text at any convergence point; a failing decode cannot fail its sync)', layer: 'a' },
+  { id: 'MB-16', source: 'docs/spec.md §6.2 (a file that keeps a merge base records its decoded body at every convergence point, including the initial-sync upload and both identical-body convergences)', layer: 'a' },
   // MM: merge-marker re-entrancy guard + nested-marker backstop + base-aware 3-way
   { id: 'MM-1', source: 'specs/039-merge-marker-reentrancy (local already has plugin markers → safe-hold, no merge)', layer: 'a' },
   { id: 'MM-2', source: 'specs/039-merge-marker-reentrancy (remote already has plugin markers → safe-hold)', layer: 'a' },

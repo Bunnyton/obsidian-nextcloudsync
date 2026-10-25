@@ -106,6 +106,7 @@ function build(o: Opts = {}, over: Partial<WatchDeps> = {}) {
     }) as unknown as SyncJournal,
     mergeBase: {
       record: () => { /* noop */ },
+      recordBytes: () => { /* noop */ },
       drop: (p: string) => { calls.droppedBase.push(p); },
     } as unknown as MergeBaseRecorder,
     transfer: {
