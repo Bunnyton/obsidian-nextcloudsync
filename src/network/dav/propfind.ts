@@ -6,7 +6,7 @@ import { RemoteListingUnreadableError } from '../../types';
 
 const DAV_NS = 'DAV:';
 const OC_NS = 'http://owncloud.org/ns';
-const NC_NS = 'http://nextcloud.org/ns';
+export const NC_NS = 'http://nextcloud.org/ns';
 
 // Namespace of the element Blink/WebKit insert instead of throwing on malformed XML.
 const PARSERERROR_NS = 'http://www.mozilla.org/newlayout/xml/parsererror.xml';
@@ -149,4 +149,32 @@ export function readOwncloudProps(prop: Element): OwncloudProps {
     checksum: m ? m[1].toLowerCase() : null,
     fileId: prop.getElementsByTagNameNS(OC_NS, 'fileid')[0]?.textContent ?? null,
   };
+}
+
+export interface NextcloudProps {
+  /** ms; 0 when the element is absent, empty, not an integer, or <= 0. */
+  creationTime: number;
+}
+
+// Separate from readOwncloudProps for the same reason: plain WebDAV callers do not call it.
+export function readNextcloudProps(prop: Element): NextcloudProps {
+  const text = prop.getElementsByTagNameNS(NC_NS, 'creation_time')[0]?.textContent ?? '';
+  const seconds = parseInt(text, 10);
+  return { creationTime: Number.isInteger(seconds) && seconds > 0 ? seconds * 1000 : 0 };
+}
+
+/**
+ * Outcome for one property in a PROPPATCH 207 body: 'applied' when the propstat that holds {ns}localName
+ * has an HTTP 200 status, 'rejected' for any other status or when the property is missing.
+ * @throws MultistatusUnreadableError when the body is not a DAV:multistatus (parseResponses).
+ */
+export function readPropPatchOutcome(xml: string, ns: string, localName: string): 'applied' | 'rejected' {
+  for (const resp of parseResponses(xml)) {
+    for (const propstat of Array.from(resp.getElementsByTagNameNS(DAV_NS, 'propstat'))) {
+      if (propstat.getElementsByTagNameNS(ns, localName).length === 0) continue;
+      const status = propstat.getElementsByTagNameNS(DAV_NS, 'status')[0]?.textContent ?? '';
+      return status.includes(' 200 ') ? 'applied' : 'rejected';
+    }
+  }
+  return 'rejected';
 }

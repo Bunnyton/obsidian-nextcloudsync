@@ -58,4 +58,26 @@ describe('ChunkedUploadStrategy', () => {
     expect(client.uploadChunked).toHaveBeenCalledTimes(1);
     expect(client.uploadFile).toHaveBeenCalledTimes(1);
   });
+
+  it('[SPEC:CT-5] passes mtime and ctime to uploadChunked in the options', async () => {
+    const client = fakeClient();
+    const s = new ChunkedUploadStrategy(uploadConfig({ uploadChunkThresholdMB: 0.0000001, maxFileSizeMB: 100 }));
+    await s.upload(client as unknown as IWebDAVClient, 'mid.bin', data, 1234, { ctime: 99, precomputedSha256: 'abc' });
+    expect(client.uploadChunked).toHaveBeenCalledWith('mid.bin', data, 10 * 1024 * 1024, { ctime: 99, precomputedSha256: 'abc', mtime: 1234 });
+  });
+
+  it('[SPEC:CT-5] keeps ctime in the options when falling back to a single PUT', async () => {
+    const client = fakeClient();
+    client.uploadChunked.mockRejectedValueOnce(new NetworkError(500, 'boom'));
+    const s = new ChunkedUploadStrategy(uploadConfig({ uploadChunkThresholdMB: 0.0000001, maxFileSizeMB: 100 }));
+    await s.upload(client as unknown as IWebDAVClient, 'mid.bin', data, 1234, { ctime: 99 });
+    expect(client.uploadFile).toHaveBeenCalledWith('mid.bin', data, 1234, { ctime: 99 });
+  });
+
+  it('[SPEC:CT-5] keeps ctime in the options for a single PUT below the threshold', async () => {
+    const client = fakeClient();
+    const s = new ChunkedUploadStrategy(uploadConfig({ uploadChunkThresholdMB: 100, maxFileSizeMB: 1000 }));
+    await s.upload(client as unknown as IWebDAVClient, 'small.md', data, 1234, { ctime: 99 });
+    expect(client.uploadFile).toHaveBeenCalledWith('small.md', data, 1234, { ctime: 99 });
+  });
 });

@@ -14,6 +14,7 @@ import { registerMirrorRibbon, registerStatusCommands } from './ui/statusEntryPo
 import { FileLogger } from './util/FileLogger';
 import { onAppResume, makeResumeSyncHandler } from './util/appResume';
 import { isSyncTmpPath, LocalAdapter } from './data/LocalAdapter';
+import { probeCreationTimeSupport } from './data/creationTimeProbe';
 import type { MergeBaseStore } from './data/MergeBaseStore';
 import { v4 as uuidv4 } from './util/uuid';
 import { hostToken, LogPlatform } from './util/hostToken';
@@ -527,9 +528,14 @@ export default class ObsidianNextcloudsync extends Plugin {
     const { WebDAVFactory } = await import('./network/WebDAVFactory');
     const { loadAppPassword } = await import('./settings/SettingTab');
 
-    const localAdapter = new LocalAdapter(this.app.vault.adapter, this.app.vault, this.app.workspace);
-    this.localAdapter = localAdapter;
     const pluginDir = `${this.app.vault.configDir}/plugins/${this.manifest.id}`;
+    const localAdapter = new LocalAdapter(
+      this.app.vault.adapter,
+      this.app.vault,
+      this.app.workspace,
+      () => probeCreationTimeSupport(this.app.vault.adapter, `${pluginDir}/.ctime-probe.ncs.tmp`),
+    );
+    this.localAdapter = localAdapter;
     const stateDB = new StateDB(this.app.vault.adapter, pluginDir, this.settings.deviceId);
     await stateDB.load();
     // Last-synced bodies (merge base) for 3-way conflict merges; a separate file.

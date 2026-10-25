@@ -304,13 +304,13 @@ describe('[SPEC:CPS-16] computeSyncScopeFingerprint', () => {
 
   it('equals the documented JSON expression', () => {
     expect(fp()).toBe(JSON.stringify([
-      'scope-v1',
+      'scope-v2',
       true,
       [['bookmarks', true], ['others', false]],
       ['a', 'b'],
       ['x', 'y'],
     ]));
-    expect(fp({ syncConfigFolder: false })).toBe(JSON.stringify(['scope-v1', false, [], ['a', 'b'], []]));
+    expect(fp({ syncConfigFolder: false })).toBe(JSON.stringify(['scope-v2', false, [], ['a', 'b'], []]));
   });
 });
 

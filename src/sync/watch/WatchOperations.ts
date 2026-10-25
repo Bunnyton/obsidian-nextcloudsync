@@ -166,7 +166,7 @@ export class WatchOperations {
         await this.deps.transfer.uploadFile(
           conn.client, conn.uploadStrategy,
           path, localHash, base?.remoteId ?? localHash, base?.idType ?? 'sha256',
-          { path, fileId: base?.remoteFileId ?? null, checksum: null, etag: null, size: stat.size, lastModified: stat.mtime },
+          { path, fileId: base?.remoteFileId ?? null, checksum: null, etag: null, size: stat.size, lastModified: stat.mtime, creationTime: 0 },
           summary,
         );
       }

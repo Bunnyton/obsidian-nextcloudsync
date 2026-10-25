@@ -45,7 +45,7 @@ const CONFIG: MergeConfig = {
 interface Opts {
   config?: Partial<MergeConfig>;
   // Local file content and stat.
-  local?: { content: string; mtime: number; size: number };
+  local?: { content: string; mtime: number; size: number; ctime?: number };
   // Remote body the client returns.
   remoteBody?: string;
   // Merge base body, '' when unknown.
@@ -65,7 +65,10 @@ function build(o: Opts = {}, over: Partial<ConflictDeps> = {}) {
     // Third argument (mtime) seen by each write, in call order.
     wroteMtime: [] as Array<number | undefined>,
     wroteBinaryMtime: [] as Array<number | undefined>,
+    // Fourth argument (ctime) seen by each text write, in call order.
+    wroteCtime: [] as Array<number | undefined>,
     uploadMtime: [] as Array<number | undefined>,
+    uploadOpts: [] as Array<{ ctime?: number } | undefined>,
     setFile: [] as FileState[],
     history: [] as string[],
     retries: [] as string[],
@@ -75,6 +78,13 @@ function build(o: Opts = {}, over: Partial<ConflictDeps> = {}) {
     conflicts: 0,
     reads: 0,
     warned: [] as string[],
+    // Fourth argument (ctime) seen by each binary write, in call order.
+    wroteBinaryCtime: [] as Array<number | undefined>,
+    // Ordered trace of stat / write / setFile / align calls.
+    events: [] as string[],
+    aligned: [] as Array<{ client: unknown; remote: RemoteFileInfo }>,
+    // Third argument (the caller's stat) seen by each align call, in call order.
+    alignedStat: [] as unknown[],
   };
 
   const client = {
@@ -82,8 +92,9 @@ function build(o: Opts = {}, over: Partial<ConflictDeps> = {}) {
   } as unknown as IWebDAVClient;
 
   const uploadStrategy = {
-    upload: async (_c: unknown, _p: string, _d: ArrayBuffer, mtime?: number) => {
+    upload: async (_c: unknown, _p: string, _d: ArrayBuffer, mtime?: number, opts?: { ctime?: number }) => {
       calls.uploadMtime.push(mtime);
+      calls.uploadOpts.push(opts);
       if (o.upload === 'throw') throw new Error('transient');
       return o.upload === 'skipped' ? 'skipped' : 'uploaded';
     },
@@ -92,19 +103,21 @@ function build(o: Opts = {}, over: Partial<ConflictDeps> = {}) {
   const deps: ConflictDeps = {
     app: {} as unknown as ConflictDeps['app'],
     localAdapter: {
-      stat: async () => ({ size: local.size, mtime: local.mtime }),
+      stat: async () => { calls.events.push('stat'); return { size: local.size, mtime: local.mtime, ctime: local.ctime }; },
       read: async () => { calls.reads++; return onDisk; },
       readBinary: async () => new TextEncoder().encode(onDisk).buffer,
-      atomicWrite: async (p: string, c: string, mtime?: number) => {
-        calls.wrote.push(p); calls.wroteMtime.push(mtime); onDisk = c;
+      atomicWrite: async (p: string, c: string, mtime?: number, ctime?: number) => {
+        calls.events.push('write');
+        calls.wrote.push(p); calls.wroteMtime.push(mtime); calls.wroteCtime.push(ctime); onDisk = c;
       },
-      atomicWriteBinary: async (p: string, d: ArrayBuffer, mtime?: number) => {
-        calls.wroteBinary.push(p); calls.wroteBinaryMtime.push(mtime); onDisk = new TextDecoder().decode(d);
+      atomicWriteBinary: async (p: string, d: ArrayBuffer, mtime?: number, ctime?: number) => {
+        calls.events.push('write');
+        calls.wroteBinary.push(p); calls.wroteBinaryMtime.push(mtime); calls.wroteBinaryCtime.push(ctime); onDisk = new TextDecoder().decode(d);
       },
     } as unknown as ConflictDeps['localAdapter'],
     stateDB: {
       getFile: () => base(),
-      setFile: (f: FileState) => { calls.setFile.push(f); },
+      setFile: (f: FileState) => { calls.events.push('setFile'); calls.setFile.push(f); },
       setRemoteRootEtag: (e: string | null) => { calls.rootEtag.push(e); },
     } as unknown as ConflictDeps['stateDB'],
     baseStore: { get: () => o.mergeBase ?? '' } as unknown as ConflictDeps['baseStore'],
@@ -124,6 +137,11 @@ function build(o: Opts = {}, over: Partial<ConflictDeps> = {}) {
     resolution: {
       captureCleanSides: (p: string) => { calls.captured.push(p); },
     } as unknown as ResolutionService,
+    creationTime: {
+      align: async (c: unknown, r: RemoteFileInfo, st?: unknown) => {
+        calls.events.push('align'); calls.aligned.push({ client: c, remote: r }); calls.alignedStat.push(st);
+      },
+    },
     localWrite: passThroughLocalWrite,
     pluginConflictRule: noPluginConflictRule,
     resolverConfig: () => ({ ...CONFIG, ...o.config }),
@@ -355,6 +373,37 @@ describe('ConflictApplier.resolveByWrite — one merge time for disk, upload and
   });
 });
 
+describe('ConflictApplier.resolveByWrite — creation time [SPEC:CT-3]', () => {
+  const OLD = 1_600_000_000_000;
+  const NEW = 1_700_000_000_000;
+  const remoteAt = (creationTime?: number) => remoteInfo({ creationTime });
+  // [label, local ctime, server ctime, expected write ctime, expected upload ctime]
+  const cases: Array<[string, number, number | undefined, number | undefined, number | undefined]> = [
+    ['older local', OLD, NEW, OLD, OLD],
+    ['older server', NEW, OLD, OLD, OLD],
+    ['server undefined', OLD, undefined, OLD, undefined],
+  ];
+
+  for (const clean of [true, false]) {
+    const kind = clean ? 'clean merge' : 'conflict markers';
+    for (const [label, local, server, expectedWrite, expectedUpload] of cases) {
+      it(`writes and uploads the older creation time: ${label}, ${kind} [SPEC:CT-3]`, async () => {
+        const { applier, conn, calls } = build({ upload: 'ok', local: { content: 'x', mtime: 1, size: 1, ctime: local } });
+        await applier.resolveByWrite(conn, 'note.md', 'merged\n', clean, remoteAt(server), 'old-remote', 'etag', summary());
+        expect(calls.wroteCtime).toEqual([expectedWrite]);
+        expect(calls.uploadOpts).toEqual([{ ctime: expectedUpload }]);
+      });
+    }
+
+    it(`stats the local file before writing: ${kind} [SPEC:CT-3]`, async () => {
+      const { applier, conn, calls } = build({ upload: 'ok', local: { content: 'x', mtime: 1, size: 1, ctime: OLD } });
+      await applier.resolveByWrite(conn, 'note.md', 'merged\n', clean, remoteAt(NEW), 'old-remote', 'etag', summary());
+      expect(calls.events.indexOf('stat')).toBeGreaterThanOrEqual(0);
+      expect(calls.events.indexOf('stat')).toBeLessThan(calls.events.indexOf('write'));
+    });
+  }
+});
+
 describe('ConflictApplier.resolveByPreferRemote — the remote mtime goes into the write [SPEC:MT-1]', () => {
   const body = (t: string): ArrayBuffer => new TextEncoder().encode(t).buffer as ArrayBuffer;
 
@@ -372,6 +421,117 @@ describe('ConflictApplier.resolveByPreferRemote — the remote mtime goes into t
       'a.txt', remoteInfo({ path: 'a.txt', lastModified: 0, size: 4 }), body('abcd'), 'r', 'etag', summary(),
     );
     expect(calls.wroteBinaryMtime).toEqual([undefined]);
+  });
+});
+
+describe('ConflictApplier.resolveByPreferRemote — creation time [SPEC:CT-2]', () => {
+  const body = (t: string): ArrayBuffer => new TextEncoder().encode(t).buffer as ArrayBuffer;
+  const OLD = 1_600_000_000_000;
+  const NEW = 1_700_000_000_000;
+  const remoteAt = (creationTime?: number) => remoteInfo({ path: 'a.txt', size: 4, creationTime });
+
+  it('writes the older of local and server creation time: older local [SPEC:CT-2]', async () => {
+    const { applier, calls } = build({ local: { content: 'x', mtime: 1, size: 1, ctime: OLD } });
+    await applier.resolveByPreferRemote('a.txt', remoteAt(NEW), body('abcd'), 'r', 'etag', summary());
+    expect(calls.wroteBinaryCtime).toEqual([OLD]);
+  });
+
+  it('writes the older of local and server creation time: older server [SPEC:CT-2]', async () => {
+    const { applier, calls } = build({ local: { content: 'x', mtime: 1, size: 1, ctime: NEW } });
+    await applier.resolveByPreferRemote('a.txt', remoteAt(OLD), body('abcd'), 'r', 'etag', summary());
+    expect(calls.wroteBinaryCtime).toEqual([OLD]);
+  });
+
+  it('writes the local creation time when the server value is undefined [SPEC:CT-2]', async () => {
+    const { applier, calls } = build({ local: { content: 'x', mtime: 1, size: 1, ctime: OLD } });
+    await applier.resolveByPreferRemote('a.txt', remoteAt(undefined), body('abcd'), 'r', 'etag', summary());
+    expect(calls.wroteBinaryCtime).toEqual([OLD]);
+  });
+
+  it('stats the local file before writing [SPEC:CT-2]', async () => {
+    const { applier, calls } = build({ local: { content: 'x', mtime: 1, size: 1, ctime: OLD } });
+    await applier.resolveByPreferRemote('a.txt', remoteAt(NEW), body('abcd'), 'r', 'etag', summary());
+    expect(calls.events.indexOf('stat')).toBeGreaterThanOrEqual(0);
+    expect(calls.events.indexOf('stat')).toBeLessThan(calls.events.indexOf('write'));
+  });
+
+  it('aligns after recording the state when a client is passed [SPEC:CT-2]', async () => {
+    const { applier, conn, calls } = build({ local: { content: 'x', mtime: 1, size: 1, ctime: OLD } });
+    const remote = remoteAt(NEW);
+    await applier.resolveByPreferRemote('a.txt', remote, body('abcd'), 'r', 'etag', summary(), conn.client);
+    expect(calls.aligned).toEqual([{ client: conn.client, remote }]);
+    expect(calls.events.indexOf('align')).toBeGreaterThan(calls.events.lastIndexOf('setFile'));
+  });
+
+  it('does not align when no client is passed [SPEC:CT-2]', async () => {
+    const { applier, calls } = build({ local: { content: 'x', mtime: 1, size: 1, ctime: OLD } });
+    await applier.resolveByPreferRemote('a.txt', remoteAt(NEW), body('abcd'), 'r', 'etag', summary());
+    expect(calls.aligned).toEqual([]);
+  });
+
+  it('handleConflict passes conn.client on the prefer-remote path [SPEC:CT-2]', async () => {
+    const { applier, conn, calls } = build({
+      config: { autoMergeFileTypes: [], otherFileStrategy: 'remote-win' },
+      local: { content: 'x', mtime: 1000, size: 1, ctime: OLD },
+    });
+    await applier.handleConflict(conn, 'a.txt', base('a.txt'), remoteAt(NEW), 'r', 'etag', summary());
+    expect(calls.aligned.map((a) => a.client)).toEqual([conn.client]);
+  });
+});
+
+describe('ConflictApplier.convergeIfIdentical — creation time [SPEC:CT-6]', () => {
+  const OLD = 1_600_000_000_000;
+  const stat = { size: 1, mtime: 1000, ctime: OLD };
+
+  it('aligns once after setFile with the fresh local stat on a body-identical convergence [SPEC:CT-6]', async () => {
+    const { applier, conn, calls } = build({ local: { content: 'x', mtime: 1000, size: 1, ctime: OLD }, remoteBody: 'x' });
+    const remote = remoteInfo({ size: 1, creationTime: OLD + 1 });
+    await applier.handleConflict(conn, 'note.md', base(), remote, 'r', 'etag', summary());
+    expect(calls.aligned).toEqual([{ client: conn.client, remote }]);
+    expect(calls.alignedStat).toEqual([stat]);
+    expect(calls.events.indexOf('align')).toBeGreaterThan(calls.events.lastIndexOf('setFile'));
+    expect(calls.conflicts).toBe(0);
+  });
+
+  it('does not converge or align before the overwrite when the bodies differ [SPEC:CT-6]', async () => {
+    const { applier, conn, calls } = build({
+      local: { content: 'x', mtime: 1000, size: 1, ctime: OLD }, remoteBody: 'y', config: { autoMergeFileTypes: [] },
+    });
+    await applier.handleConflict(conn, 'note.md', base(), remoteInfo({ size: 1 }), 'r', 'etag', summary());
+    expect(calls.conflicts).toBe(1);
+    expect(calls.aligned).toEqual([]);
+  });
+
+  it('accepts a null local stat without converging or aligning [SPEC:CT-6]', async () => {
+    const { applier, conn, calls } = build();
+    const priv = applier as unknown as {
+      convergeIfIdentical(c: unknown, p: string, r: RemoteFileInfo, s: null): Promise<{ converged: boolean }>;
+    };
+    expect(await priv.convergeIfIdentical(conn, 'note.md', remoteInfo(), null)).toEqual({ converged: false });
+    expect(calls.aligned).toEqual([]);
+  });
+});
+
+describe('ConflictApplier.resolveByPreferLocal — creation time [SPEC:CT-4]', () => {
+  const OLD = 1_600_000_000_000;
+  const NEW = 1_700_000_000_000;
+
+  it('uploads with the older of local and server creation time: older local [SPEC:CT-4]', async () => {
+    const { applier, conn, calls } = build({ local: { content: 'x', mtime: 1, size: 1, ctime: OLD } });
+    await applier.resolveByPreferLocal(conn, 'note.md', remoteInfo({ creationTime: NEW }), summary());
+    expect(calls.uploadOpts).toEqual([{ ctime: OLD }]);
+  });
+
+  it('uploads with the older of local and server creation time: older server [SPEC:CT-4]', async () => {
+    const { applier, conn, calls } = build({ local: { content: 'x', mtime: 1, size: 1, ctime: NEW } });
+    await applier.resolveByPreferLocal(conn, 'note.md', remoteInfo({ creationTime: OLD }), summary());
+    expect(calls.uploadOpts).toEqual([{ ctime: OLD }]);
+  });
+
+  it('sends no ctime when the server value is unknown [SPEC:CT-4]', async () => {
+    const { applier, conn, calls } = build({ local: { content: 'x', mtime: 1, size: 1, ctime: OLD } });
+    await applier.resolveByPreferLocal(conn, 'note.md', remoteInfo({ creationTime: undefined }), summary());
+    expect(calls.uploadOpts).toEqual([{ ctime: undefined }]);
   });
 });
 

@@ -36,7 +36,7 @@ describe('[SPEC:G5-1]: ChunkedUploadStrategy forwards ifMatchEtag to uploadChunk
     expect(outcome).toBe('uploaded');
     expect(client.uploadChunked).toHaveBeenCalledTimes(1);
     const [, , , forwardedOpts] = client.uploadChunked.mock.calls[0];
-    expect(forwardedOpts).toEqual({ ifMatchEtag: 'remote-etag' });
+    expect(forwardedOpts).toEqual({ ifMatchEtag: 'remote-etag', mtime: 1000 });
   });
 });
 

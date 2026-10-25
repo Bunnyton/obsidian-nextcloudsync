@@ -5,7 +5,7 @@ import {
   FileState, RemoteFileInfo, SyncSessionSummary, SyncHistoryDetail, ConflictResolution,
   FileLockedError,
 } from '../../types';
-import { LocalAdapter } from '../../data/LocalAdapter';
+import { LocalAdapter, type LocalStat } from '../../data/LocalAdapter';
 import { StateDB } from '../../data/StateDB';
 import { MergeBaseStore } from '../../data/MergeBaseStore';
 import { IWebDAVClient } from '../../network/IWebDAVClient';
@@ -20,9 +20,11 @@ import { isMarkdown } from '../../util/mergeableExtensions';
 import { isAnomalousRemoteContent } from '../../util/limits';
 import { FileLogger } from '../../util/FileLogger';
 import { sha256 } from '../../util/hash';
+import { uploadCreationTimeMs, writeCreationTimeMs } from '../../util/creationTime';
 import { bytesEqual, checksumProvesIdentical, convergedState } from '../identity/contentIdentity';
 import type { LocalWritePort, PluginConflictRule } from '../plugins/PluginSyncCoordinator';
 import type { App } from 'obsidian';
+import type { CreationTimePort } from '../ctime/CreationTimeAligner';
 
 export interface Connection {
   client: IWebDAVClient;
@@ -30,6 +32,9 @@ export interface Connection {
 }
 
 export interface ConflictDeps {
+  // Aligns the creation time of files whose body this sync left unchanged (docs/spec.md §9.7). Optional so tests
+  // can omit it; the engine always passes one.
+  creationTime?: CreationTimePort;
   app: App;
   localAdapter: LocalAdapter;
   stateDB: Pick<StateDB, 'getFile' | 'setFile' | 'setRemoteRootEtag'>;
@@ -165,7 +170,7 @@ export class ConflictApplier {
 
       case 'prefer-remote':
         if (!remoteData) remoteData = await conn.client.downloadFile(remote.path);
-        await this.resolveByPreferRemote(path, remote, remoteData, remoteId, idType, summary);
+        await this.resolveByPreferRemote(path, remote, remoteData, remoteId, idType, summary, conn.client);
         return;
 
       case 'write':
@@ -177,7 +182,7 @@ export class ConflictApplier {
   // Proof of identity is the server checksum, or the fetched body when the server has none and the sizes match.
   private async convergeIfIdentical(
     conn: Connection, path: string, remote: RemoteFileInfo,
-    localStat: { size: number; mtime: number } | null,
+    localStat: LocalStat | null,
   ): Promise<{ converged: boolean; remoteData?: ArrayBuffer }> {
     if (!localStat) return { converged: false };
     const localData = await this.deps.localAdapter.readBinary(path);
@@ -195,6 +200,7 @@ export class ConflictApplier {
       this.deps.localAdapter, convergedState(remote, localHash, localStat), remote.lastModified,
     ));
     this.deps.mergeBase.record(path, new TextDecoder().decode(localData));
+    await this.deps.creationTime?.align(conn.client, remote, localStat);
     void this.deps.logger?.log(`conflict: content identical to the remote → state converged, no transfer → ${path}`);
     return { converged: true };
   }
@@ -207,7 +213,10 @@ export class ConflictApplier {
     // One merge time, read once: the local write, the X-OC-MTime of the upload and the stored state all use it.
     // (PROPPATCH of mtime is silently ignored on Nextcloud, so the upload header is what sets the remote time.)
     const mergeMtime = Date.now();
-    await this.deps.localAdapter.atomicWrite(path, content, mergeMtime);
+    const before = await this.deps.localAdapter.stat(path);
+    await this.deps.localAdapter.atomicWrite(
+      path, content, mergeMtime, writeCreationTimeMs(before?.ctime, remote.creationTime),
+    );
 
     // Without this push the merge stays local-only and every later sync re-detects the same conflict.
     const mergedData = await this.deps.localAdapter.readBinary(path);
@@ -216,7 +225,9 @@ export class ConflictApplier {
     try {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
-        const outcome = await conn.uploadStrategy.upload(conn.client, path, mergedData, mergeMtime);
+        const outcome = await conn.uploadStrategy.upload(conn.client, path, mergedData, mergeMtime, {
+          ctime: uploadCreationTimeMs(before?.ctime, remote.creationTime),
+        });
         if (outcome !== 'skipped') { summary.uploadedCount++; uploaded = true; this.deps.journal.recordHistory(path, 'uploaded'); }
       } finally {
         await this.deps.transfer.releaseLock(conn.client, path, lockToken);
@@ -276,7 +287,9 @@ export class ConflictApplier {
     try {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
-        const outcome = await conn.uploadStrategy.upload(conn.client, path, localData, mtime);
+        const outcome = await conn.uploadStrategy.upload(conn.client, path, localData, mtime, {
+          ctime: uploadCreationTimeMs(stat?.ctime, remote.creationTime),
+        });
         if (outcome === 'skipped') {
           // Skipped (e.g. size limit): leave the conflict unresolved.
           this.deps.queueRetry(path);
@@ -311,6 +324,7 @@ export class ConflictApplier {
   async resolveByPreferRemote(
     path: string, remote: RemoteFileInfo, remoteData: ArrayBuffer,
     remoteId: string, idType: FileState['idType'], summary: SyncSessionSummary,
+    client?: IWebDAVClient,
   ): Promise<void> {
     // Never overwrite local with a body whose length disagrees with the advertised size (0-byte or truncated).
     if (isAnomalousRemoteContent(remote.size, remoteData.byteLength)) {
@@ -320,8 +334,10 @@ export class ConflictApplier {
       return;
     }
     try {
+      const before = await this.deps.localAdapter.stat(path);
       await this.deps.localAdapter.atomicWriteBinary(
         path, remoteData, this.deps.localWrite.mtimeFor(path, remote.lastModified || undefined),
+        writeCreationTimeMs(before?.ctime, remote.creationTime),
       );
       this.deps.localWrite.written(path);
     } catch (err) {
@@ -343,6 +359,7 @@ export class ConflictApplier {
       remoteFileId: remote.fileId, isConflicted: false,
     }, remote.lastModified));
     this.deps.mergeBase.record(path, new TextDecoder().decode(remoteData));
+    if (client) await this.deps.creationTime?.align(client, remote);
     void this.deps.logger?.log(`conflict: resolved by prefer-remote (local overwritten) → ${path}`);
   }
 }

@@ -10,6 +10,7 @@ import { FileState, RemoteFileInfo } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { IUploadStrategy } from '../../../../src/sync/upload/IUploadStrategy';
 import { passThroughLocalWrite } from '../../support/pluginPorts';
+import { spec } from '../../support/specRef';
 
 const remote = (over: Partial<RemoteFileInfo> = {}): RemoteFileInfo => ({
   path: 'note.md', fileId: 'fid', checksum: null, etag: '"e"', size: 11, lastModified: 2000, ...over,
@@ -29,6 +30,7 @@ interface Opts {
   upload?: 'ok' | 'skipped' | 'throw';
   snapshots?: Record<string, Snapshot>;
   conflicted?: string[];          // paths the state DB reports as conflicted
+  localCtime?: number;            // creation time reported by the pre-write stat
 }
 
 function build(o: Opts = {}, over: Partial<ResolutionDeps> = {}) {
@@ -47,6 +49,10 @@ function build(o: Opts = {}, over: Partial<ResolutionDeps> = {}) {
     uploads: [] as string[],
     writeMtimes: [] as Array<number | undefined>,
     uploadMtimes: [] as Array<number | undefined>,
+    uploadCtimes: [] as Array<number | undefined>,
+    writeCtimes: [] as Array<number | undefined>,
+    order: [] as string[],
+    aligned: [] as unknown[][],
   };
 
   const client = {
@@ -58,9 +64,10 @@ function build(o: Opts = {}, over: Partial<ResolutionDeps> = {}) {
   } as unknown as IWebDAVClient;
 
   const uploadStrategy = {
-    upload: async (_c: unknown, p: string, _d: unknown, mtime?: number) => {
+    upload: async (_c: unknown, p: string, _d: unknown, mtime?: number, opts?: { ctime?: number }) => {
       calls.uploads.push(p);
       calls.uploadMtimes.push(mtime);
+      calls.uploadCtimes.push(opts?.ctime);
       if (o.upload === 'throw') throw new Error('PUT failed');
       return o.upload === 'skipped' ? 'skipped' : 'uploaded';
     },
@@ -68,15 +75,15 @@ function build(o: Opts = {}, over: Partial<ResolutionDeps> = {}) {
 
   const deps: ResolutionDeps = {
     localAdapter: {
-      stat: async () => (onDisk == null ? null : { size: onDisk.length, mtime: 1000 }),
+      stat: async () => (onDisk == null ? null : { size: onDisk.length, mtime: 1000, ctime: o.localCtime }),
       readBinary: async () => new TextEncoder().encode(onDisk ?? '').buffer,
-      atomicWriteBinary: async (p: string, d: ArrayBuffer, mtime?: number) => {
-        calls.wroteBinary.push(p); calls.writeMtimes.push(mtime); onDisk = new TextDecoder().decode(d);
+      atomicWriteBinary: async (p: string, d: ArrayBuffer, mtime?: number, ctime?: number) => {
+        calls.wroteBinary.push(p); calls.writeMtimes.push(mtime); calls.writeCtimes.push(ctime); onDisk = new TextDecoder().decode(d);
       },
     } as unknown as ResolutionDeps['localAdapter'],
     stateDB: {
       getFile: (p: string) => (o.conflicted?.includes(p) ? { isConflicted: true } as FileState : undefined),
-      setFile: (f: FileState) => { calls.setFile.push(f); },
+      setFile: (f: FileState) => { calls.setFile.push(f); calls.order.push('setFile'); },
       save: async () => { calls.saved++; },
       countConflicted: () => o.conflicted?.length ?? 0,
     } as unknown as ResolutionDeps['stateDB'],
@@ -259,6 +266,93 @@ describe('ResolutionService — force resolution by push / pull', () => {
   });
 });
 
+describe('ResolutionService.pushLocalToRemote creation time', () => {
+  const T_OLD = 1690000000000;
+  const T_NEW = 1700000000000;
+
+  it(`${spec('CT-4')} sends the older of local and server creation time`, async () => {
+    const { service, conn, calls } = build({ localContent: 'x', localCtime: T_NEW, remoteInfos: [remote({ creationTime: T_OLD })] });
+    await service.pushLocalToRemote(conn, 'note.md');
+    expect(calls.uploadCtimes).toEqual([T_OLD]);
+  });
+
+  it(`${spec('CT-4')} sends the local value when it is older than the server's`, async () => {
+    const { service, conn, calls } = build({ localContent: 'x', localCtime: T_OLD, remoteInfos: [remote({ creationTime: T_NEW })] });
+    await service.pushLocalToRemote(conn, 'note.md');
+    expect(calls.uploadCtimes).toEqual([T_OLD]);
+  });
+
+  it(`${spec('CT-4')} sends the local value when the remote does not exist`, async () => {
+    const { service, conn, calls } = build({ localContent: 'x', localCtime: T_OLD, remoteInfos: [] });
+    await service.pushLocalToRemote(conn, 'note.md');
+    expect(calls.uploadCtimes).toEqual([T_OLD]);
+  });
+
+  it(`${spec('CT-4')} sends no ctime when the server value is unknown`, async () => {
+    const { service, conn, calls } = build({ localContent: 'x', localCtime: T_OLD, remoteInfos: [remote({ creationTime: undefined })] });
+    await service.pushLocalToRemote(conn, 'note.md');
+    expect(calls.uploadCtimes).toHaveLength(1);
+    expect(calls.uploadCtimes[0]).toBeUndefined();
+  });
+});
+
+describe('ResolutionService.pullRemoteToLocal creation time', () => {
+  const T_OLD = 1690000000000;
+  const T_NEW = 1700000000000;
+  const withCt = (c?: number) => [remote({ creationTime: c })];
+
+  it(`${spec('CT-2')} uses the older pre-write local ctime`, async () => {
+    const { service, client, calls } = build({ localContent: 'old', localCtime: T_OLD, remoteInfos: withCt(T_NEW) });
+    await service.pullRemoteToLocal(client, 'note.md');
+    expect(calls.writeCtimes).toEqual([T_OLD]);
+  });
+
+  it(`${spec('CT-2')} uses the older server value when the local ctime is newer`, async () => {
+    const { service, client, calls } = build({ localContent: 'old', localCtime: T_NEW, remoteInfos: withCt(T_OLD) });
+    await service.pullRemoteToLocal(client, 'note.md');
+    expect(calls.writeCtimes).toEqual([T_OLD]);
+  });
+
+  it(`${spec('CT-2')} uses the server value for a new download`, async () => {
+    const { service, client, calls } = build({ localContent: null, remoteInfos: withCt(T_NEW) });
+    await service.pullRemoteToLocal(client, 'note.md');
+    expect(calls.writeCtimes).toEqual([T_NEW]);
+  });
+
+  it(`${spec('CT-2')} keeps the local ctime when the server has none`, async () => {
+    const { service, client, calls } = build({ localContent: 'old', localCtime: T_OLD, remoteInfos: withCt(undefined) });
+    await service.pullRemoteToLocal(client, 'note.md');
+    expect(calls.writeCtimes).toEqual([T_OLD]);
+  });
+
+  it(`${spec('CT-2')} passes undefined when neither side is valid`, async () => {
+    const { service, client, calls } = build({ localContent: 'old', remoteInfos: withCt(undefined) });
+    await service.pullRemoteToLocal(client, 'note.md');
+    expect(calls.writeCtimes).toHaveLength(1);
+    expect(calls.writeCtimes[0]).toBeUndefined();
+  });
+
+  it(`${spec('CT-6')} aligns once after setFile with no third argument`, async () => {
+    const { service, client, calls } = build({ localContent: 'old', remoteInfos: withCt(T_NEW) }, {
+      creationTime: {
+        align: async (...a: unknown[]) => { calls.order.push('align'); calls.aligned.push(a); },
+      },
+    });
+    const info = remote({ creationTime: T_NEW });
+    await service.pullRemoteToLocal(client, 'note.md');
+    expect(calls.aligned).toHaveLength(1);
+    expect(calls.aligned[0]).toHaveLength(2);
+    expect(calls.aligned[0][0]).toBe(client);
+    expect(calls.aligned[0][1]).toMatchObject({ path: info.path, creationTime: T_NEW });
+    expect(calls.order).toEqual(['setFile', 'align']);
+  });
+
+  it(`${spec('CT-6')} does not throw when no aligner is wired`, async () => {
+    const { service, client } = build({ localContent: 'old', remoteInfos: withCt(T_NEW) });
+    await expect(service.pullRemoteToLocal(client, 'note.md')).resolves.toBeUndefined();
+  });
+});
+
 describe('ResolutionService — clean-side snapshots', () => {
   const snap = (over: Partial<Snapshot> = {}): Snapshot => ({
     local: 'clean local', remote: 'clean remote',
@@ -323,6 +417,59 @@ describe('ResolutionService — clean-side snapshots', () => {
     expect(calls.uploadMtimes).toHaveLength(1);
     expect(typeof calls.uploadMtimes[0]).toBe('number');
     expect(calls.writeMtimes).toEqual(calls.uploadMtimes);
+  });
+
+  describe('creation time', () => {
+    const T_OLD = 1690000000000;
+    const T_NEW = 1700000000000;
+    const sn = { 'note.md': snap() };
+
+    for (const side of ['applyCleanLocal', 'applyCleanRemote'] as const) {
+      it(`${spec('CT-3')} ${side}: older local ctime wins over a newer server value`, async () => {
+        const { service, conn, calls } = build({
+          localContent: 'x', localCtime: T_OLD, remoteInfos: [remote({ creationTime: T_NEW })], snapshots: sn,
+        });
+        await service[side](conn, 'note.md');
+        expect(calls.uploadCtimes).toEqual([T_OLD]);
+        expect(calls.writeCtimes).toEqual([T_OLD]);
+      });
+
+      it(`${spec('CT-3')} ${side}: older server value wins over a newer local ctime`, async () => {
+        const { service, conn, calls } = build({
+          localContent: 'x', localCtime: T_NEW, remoteInfos: [remote({ creationTime: T_OLD })], snapshots: sn,
+        });
+        await service[side](conn, 'note.md');
+        expect(calls.uploadCtimes).toEqual([T_OLD]);
+        expect(calls.writeCtimes).toEqual([T_OLD]);
+      });
+
+      it(`${spec('CT-3')} ${side}: no remote file falls back to the local ctime`, async () => {
+        const { service, conn, calls } = build({
+          localContent: 'x', localCtime: T_OLD, remoteInfos: [], snapshots: sn,
+        });
+        await service[side](conn, 'note.md');
+        expect(calls.uploadCtimes).toEqual([T_OLD]);
+        expect(calls.writeCtimes).toEqual([T_OLD]);
+      });
+
+      it(`${spec('CT-3')} ${side}: no remote file and no local file leaves both ctimes undefined`, async () => {
+        const { service, conn, calls } = build({ localContent: null, remoteInfos: [], snapshots: sn });
+        await service[side](conn, 'note.md');
+        expect(calls.uploadCtimes).toHaveLength(1);
+        expect(calls.uploadCtimes[0]).toBeUndefined();
+        expect(calls.writeCtimes).toHaveLength(1);
+        expect(calls.writeCtimes[0]).toBeUndefined();
+      });
+
+      it(`${spec('CT-3')} ${side}: server value only is used when the local file is absent`, async () => {
+        const { service, conn, calls } = build({
+          localContent: null, remoteInfos: [remote({ creationTime: T_NEW })], snapshots: sn,
+        });
+        await service[side](conn, 'note.md');
+        expect(calls.uploadCtimes).toEqual([T_NEW]);
+        expect(calls.writeCtimes).toEqual([T_NEW]);
+      });
+    }
   });
 
   it('applyCleanRemote: writes the captured remote side to both sides', async () => {
