@@ -525,6 +525,11 @@ export const CLAUSES: Clause[] = [
   { id: 'DSD-5', source: 'specs/main/spec.md §15 / specs/077-declarative-settings/spec.md (FR-008: disabled/visible predicates reflect isMobile, isIosApp and sign-in state — evaluated for both sides of each, which reading Platform directly would not allow)', layer: 'a' },
   { id: 'DOC-1', source: 'docs/spec.md §19 (every docs/spec.md / docs/plan.md section reference in a comment resolves to a heading)', layer: 'a' },
   { id: 'DOC-2', source: 'docs/spec.md §19 (no comment references a private path or carries a feature-number history marker)', layer: 'a' },
+  { id: 'DEP-1', source: 'docs/spec.md §20 (held dependencies stay at typescript 6.0.3 and @wdio/* 9.31.6 in the lockfile, minAppVersion stays 1.13.0, every specifier is a caret range)', layer: 'a' },
+  { id: 'DEP-2', source: 'docs/spec.md §15 / §20 (the app-password SecretComponent stores the chosen secret ID and shows the default ID when none is stored)', layer: 'a' },
+  { id: 'DEP-3', source: 'docs/spec.md §15 / §20 (a null selection from SecretComponent is stored as the unset value and resolves to the default secret ID at read time)', layer: 'a' },
+  { id: 'DEP-4', source: 'docs/spec.md §20 (a three-way merge whose two sides are identical returns exactly that text for an empty, equal or different base)', layer: 'a' },
+  { id: 'DEP-5', source: 'docs/spec.md §20 (Node 26 and the pnpm version agree across package.json, CI, the runner image and the toolchain table)', layer: 'a' },
   // RIB: sync ribbon button (issue #19)
   // A ribbon entry point for manual sync on mobile. Unlike the SyncStatusModal DOM clauses, the wiring is
   // extracted into registerSyncRibbon(host) against a minimal SyncRibbonHost, so it IS exercised for real at
