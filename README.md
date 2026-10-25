@@ -31,9 +31,9 @@ This plugin is still young and some behaviour can be rough around the edges. **P
 
 ---
 
-## What's new in this release (1.0.13-beta.4)
+## What's new in this release (1.0.13-beta.5)
 
-- **Large binary files no longer fail to sync (1.0.13-beta.4)** — after a transfer, files that are not merged as text (images, videos, PDFs, archives and so on) are no longer converted to text for the merge base. This removes wasted CPU time and memory, and fixes a sync failure for very large binaries that happened after the file had already been transferred. Markdown and Auto Merge files behave as before. There is no setting.
+- **Dependency update and a safer password-secret selection (1.0.13-beta.5)** — the libraries and the build and test toolchain are updated to their latest compatible versions. Clearing the selected password secret in the settings is now stored as "not set", so sign-in falls back to the default secret name exactly as before instead of keeping an invalid value. There is no setting and sync behaviour is unchanged.
 
 For the full version history of every release, see the **[changelog](CHANGELOG.md)**.
 
