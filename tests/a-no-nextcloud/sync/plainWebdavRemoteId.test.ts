@@ -56,7 +56,7 @@ async function recordAfterUpload(
     stateDB,
     localWrite: passThroughLocalWrite,
     journal: new SyncJournal({}) as unknown as SyncJournal,
-    mergeBase: { record: () => undefined, drop: () => undefined } as unknown as MergeBaseRecorder,
+    mergeBase: { record: () => undefined, recordBytes: () => undefined, drop: () => undefined } as unknown as MergeBaseRecorder,
     maxFileSizeMB: () => 0,
     hasFilesLocking: () => false,
     // A plain WebDAV server: the client never fills in a checksum, for any file.

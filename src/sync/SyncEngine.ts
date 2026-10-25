@@ -576,8 +576,8 @@ export class SyncEngine {
     return effectiveMassDeleteLimit(this.opts.settings.massDeleteLimit, tracked);
   }
 
-  private recordMergeBase(path: string, content: string): void {
-    this.mergeBase.record(path, content);
+  private recordMergeBase(path: string, body: ArrayBuffer): void {
+    this.mergeBase.recordBytes(path, body);
   }
 
   private dropMergeBase(path: string): void {
@@ -1401,7 +1401,7 @@ export class SyncEngine {
           const stat = await this.opts.localAdapter.stat(path);
           this.opts.stateDB.setFile(await this.withLocalSignature({ path, localHash, remoteId: localHash, idType: 'sha256', size: lf.size, mtime: stat?.mtime ?? 0, remoteFileId: null, isConflicted: false }));
           // This batch bypasses uploadFile, so it seeds its own merge base; without it a later concurrent edit duplicates shared blocks.
-          this.recordMergeBase(path, new TextDecoder().decode(data));
+          this.recordMergeBase(path, data);
         } catch (err) { this.recordError(summary, path, err); this.retryQueue.push(path); }
         this.tickProgress();
       },

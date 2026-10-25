@@ -126,6 +126,7 @@ function build(o: Opts = {}, over: Partial<ConflictDeps> = {}) {
     }) as unknown as SyncJournal,
     mergeBase: {
       record: (p: string) => { calls.mergeBase.push(p); },
+      recordBytes: (p: string) => { calls.mergeBase.push(p); },
       drop: () => { /* noop */ },
     } as unknown as MergeBaseRecorder,
     transfer: {

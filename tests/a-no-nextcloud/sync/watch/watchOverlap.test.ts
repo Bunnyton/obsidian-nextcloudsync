@@ -71,7 +71,7 @@ function buildRacy() {
     historyStore: { save: async () => undefined } as unknown as WatchDeps['historyStore'],
     statusBar: { setStatus: () => undefined } as unknown as WatchDeps['statusBar'],
     journal: new SyncJournal({}) as unknown as SyncJournal,
-    mergeBase: { record: () => undefined, drop: () => undefined } as unknown as MergeBaseRecorder,
+    mergeBase: { record: () => undefined, recordBytes: () => undefined, drop: () => undefined } as unknown as MergeBaseRecorder,
     transfer: { uploadFile: async () => undefined } as unknown as TransferService,
     deletion: {
       applyLocalDeletion: async () => { events.push('delete'); },

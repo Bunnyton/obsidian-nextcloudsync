@@ -86,6 +86,7 @@ function build(over: Partial<MirrorDeps> = {}, tracked: FileState[] = []) {
     journal: new SyncJournal({}),
     mergeBase: {
       record: () => { /* noop */ },
+      recordBytes: () => { /* noop */ },
       drop: (p: string) => { calls.droppedBase.push(p); },
     } as unknown as MergeBaseRecorder,
     plugins: noopPluginSession,
