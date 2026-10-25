@@ -31,9 +31,9 @@ This plugin is still young and some behaviour can be rough around the edges. **P
 
 ---
 
-## What's new in this release (1.0.13-beta.2)
+## What's new in this release (1.0.13-beta.3)
 
-- **Sync selected community plugins (1.0.13-beta.2)** — with **Sync config folder** ON, **Choose plugins…** lets each device pick the community plugins to sync; the list is empty by default, so nothing changes until you add one. Only `manifest.json`, `main.js`, `styles.css` and `data.json` of a listed plugin sync, and only between devices that list it. **Dangerous:** syncing a plugin copies its code to your other devices, where Obsidian runs it, so adding one asks for confirmation twice. When the code of an enabled plugin changes, you are asked to restart Obsidian, and its settings (`data.json`) wait until then. Plugins that are desktop-only on mobile, over the size limit, or need a newer Obsidian are skipped on that device. Which plugins are enabled stays local to each device.
+- **Creation times are kept across devices (1.0.13-beta.3)** — a downloaded file now keeps the creation time it has on the server instead of getting the time of the sync, and an upload sends the device's creation time to the server. When the device and the server disagree, both are set to the older value on the next sync, without transferring the file again, so files synced before this update are repaired as well. There is no setting. On platforms that cannot set a file's creation time (Linux desktop, for example), the creation time is not changed on that device and syncing works as before. A change of only the creation time can take up to 21 syncs to reach other devices.
 
 For the full version history of every release, see the **[changelog](CHANGELOG.md)**.
 
