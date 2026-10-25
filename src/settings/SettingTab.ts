@@ -130,7 +130,9 @@ export class NextcloudSyncSettingTab extends PluginSettingTab implements Setting
     setting.addComponent((el) => new SecretComponent(this.app, el)
       .setValue(this.plugin.settings.passwordSecretId || DEFAULT_PASSWORD_SECRET_ID)
       .onChange(async (secretId) => {
-        this.plugin.settings.passwordSecretId = secretId;
+        // SecretComponent reports null when the selection is cleared; store the "unset" value ('') so the
+        // existing `|| DEFAULT_PASSWORD_SECRET_ID` fallback at read time stays the only resolution path.
+        this.plugin.settings.passwordSecretId = secretId ?? '';
         await this.plugin.saveSettings();
         // Sign-in state gates the banner's visibility and "Sync now", so rebuild.
         this.update();
