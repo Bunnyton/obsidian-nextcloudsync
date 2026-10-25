@@ -7,6 +7,7 @@
 import {
   parseResponses, readSyncToken, readHref, readProp, readStatusText,
   readIsCollection, readDavProps, readOwncloudProps, readLockDiscoveryOwner, MultistatusUnreadableError,
+  readNextcloudProps, readPropPatchOutcome, NC_NS,
 } from '../../../../src/network/dav/propfind';
 import { installBrowserLikeDOMParser, PARSERERROR_NS } from '../../support/browserLikeDOMParser';
 
@@ -334,5 +335,72 @@ describe('readSyncToken', () => {
     // same body, so the Blink parsererror shape never gets this far; the throw is pinned so a future reordering cannot
     // make it silently return ''.
     expect(() => readSyncToken('not xml')).toThrow();
+  });
+});
+
+describe('readNextcloudProps — creation_time', () => {
+  function propOf(body: string): Element {
+    const xml = `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:nc="http://nextcloud.org/ns"><d:response><d:href>/a</d:href><d:propstat><d:prop>${body}</d:prop></d:propstat></d:response></d:multistatus>`;
+    return readProp(parseResponses(xml)[0])!;
+  }
+
+  it('[SPEC:CT-6] reads <nc:creation_time> seconds as epoch ms', () => {
+    expect(readNextcloudProps(propOf('<nc:creation_time>1700000000</nc:creation_time>')).creationTime).toBe(1700000000000);
+  });
+
+  it.each([
+    ['element absent', '<d:getetag>"x"</d:getetag>'],
+    ['empty element', '<nc:creation_time></nc:creation_time>'],
+    ['non-numeric', '<nc:creation_time>abc</nc:creation_time>'],
+    ['zero', '<nc:creation_time>0</nc:creation_time>'],
+    ['negative', '<nc:creation_time>-5</nc:creation_time>'],
+  ])('[SPEC:CT-6] returns 0 for %s', (_label, body) => {
+    expect(readNextcloudProps(propOf(body)).creationTime).toBe(0);
+  });
+
+  it('[SPEC:CT-6] truncates a fractional value through parseInt (12.5 reads as 12 s)', () => {
+    expect(readNextcloudProps(propOf('<nc:creation_time>12.5</nc:creation_time>')).creationTime).toBe(12000);
+  });
+});
+
+describe('readPropPatchOutcome', () => {
+  const NS = 'http://nextcloud.org/ns';
+  function patchBody(...propstats: string[]): string {
+    return `<?xml version="1.0"?><d:multistatus xmlns:d="DAV:" xmlns:nc="${NS}"><d:response><d:href>/a</d:href>${propstats.join('')}</d:response></d:multistatus>`;
+  }
+  const propstat = (inner: string, status: string) =>
+    `<d:propstat><d:prop>${inner}</d:prop><d:status>${status}</d:status></d:propstat>`;
+
+  it('[SPEC:CT-8] exports the Nextcloud namespace', () => {
+    expect(NC_NS).toBe(NS);
+  });
+
+  it('[SPEC:CT-8] reports applied for a 200 propstat holding the property', () => {
+    const xml = patchBody(propstat('<nc:creation_time/>', 'HTTP/1.1 200 OK'));
+    expect(readPropPatchOutcome(xml, NS, 'creation_time')).toBe('applied');
+  });
+
+  it.each(['HTTP/1.1 403 Forbidden', 'HTTP/1.1 424 Failed Dependency'])(
+    '[SPEC:CT-8] reports rejected for %s',
+    (status) => {
+      expect(readPropPatchOutcome(patchBody(propstat('<nc:creation_time/>', status)), NS, 'creation_time')).toBe('rejected');
+    },
+  );
+
+  it('[SPEC:CT-8] reports rejected when the property is missing from the body', () => {
+    const xml = patchBody(propstat('<nc:other/>', 'HTTP/1.1 200 OK'));
+    expect(readPropPatchOutcome(xml, NS, 'creation_time')).toBe('rejected');
+  });
+
+  it('[SPEC:CT-8] judges only the propstat that holds the property', () => {
+    const xml = patchBody(
+      propstat('<nc:other/>', 'HTTP/1.1 200 OK'),
+      propstat('<nc:creation_time/>', 'HTTP/1.1 403 Forbidden'),
+    );
+    expect(readPropPatchOutcome(xml, NS, 'creation_time')).toBe('rejected');
+  });
+
+  it('[SPEC:CT-8] throws MultistatusUnreadableError when the body is not a multistatus', () => {
+    expect(() => readPropPatchOutcome('<html><body>oops</body></html>', NS, 'creation_time')).toThrow(MultistatusUnreadableError);
   });
 });

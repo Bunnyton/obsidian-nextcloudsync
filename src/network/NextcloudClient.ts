@@ -28,12 +28,14 @@ import { PARSE_YIELD_EVERY } from '../util/limits';
 import { NO_CACHE_HEADERS } from './noCacheHeaders';
 import {
   readMultistatus, readSyncToken, readHref, readProp, readStatusText,
-  readIsCollection, readDavProps, readOwncloudProps, readLockDiscoveryOwner,
+  readIsCollection, readDavProps, readOwncloudProps, readNextcloudProps, readLockDiscoveryOwner,
+  readPropPatchOutcome, MultistatusUnreadableError, NC_NS,
 } from './dav/propfind';
+import { isValidCreationMs, creationSeconds } from '../util/creationTime';
 import { withRetry } from '../util/retry';
 
 const PROPFIND_BODY = `<?xml version="1.0" encoding="utf-8" ?>
-<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+<d:propfind xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
   <d:prop>
     <d:getetag/>
     <d:getcontentlength/>
@@ -42,6 +44,7 @@ const PROPFIND_BODY = `<?xml version="1.0" encoding="utf-8" ?>
     <d:sync-token/>
     <oc:checksums/>
     <oc:fileid/>
+    <nc:creation_time/>
   </d:prop>
 </d:propfind>`;
 
@@ -49,7 +52,7 @@ const PROPFIND_BODY = `<?xml version="1.0" encoding="utf-8" ?>
 const LOCKDISCOVERY_BODY = `<?xml version="1.0"?><D:propfind xmlns:D="DAV:"><D:prop><D:lockdiscovery/></D:prop></D:propfind>`;
 
 const REPORT_BODY = (syncToken: string) => `<?xml version="1.0" encoding="utf-8" ?>
-<d:sync-collection xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+<d:sync-collection xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns" xmlns:nc="http://nextcloud.org/ns">
   <d:sync-token>${syncToken}</d:sync-token>
   <d:sync-level>infinite</d:sync-level>
   <d:prop>
@@ -59,6 +62,7 @@ const REPORT_BODY = (syncToken: string) => `<?xml version="1.0" encoding="utf-8"
     <d:resourcetype/>
     <oc:checksums/>
     <oc:fileid/>
+    <nc:creation_time/>
   </d:prop>
 </d:sync-collection>`;
 
@@ -405,7 +409,7 @@ export class NextcloudClient implements IWebDAVClient {
 
   async uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; ctime?: number },
   ): Promise<void> {
     // PUT first and MKCOL the parents only on a missing parent, then retry once: drops the per-upload directory probe on the common path.
     const checksum = `SHA256:${opts?.precomputedSha256 ?? await sha256(data)}`;
@@ -416,6 +420,8 @@ export class NextcloudClient implements IWebDAVClient {
     };
     // X-OC-MTime (Unix seconds) tells Nextcloud to preserve the local file's modification time.
     if (mtime) headers['X-OC-MTime'] = String(Math.floor(mtime / 1000));
+    // X-OC-CTime (Unix seconds) sets the creation time (docs/spec.md §9.7); an invalid value is not sent.
+    if (opts?.ctime !== undefined && isValidCreationMs(opts.ctime)) headers['X-OC-CTime'] = String(creationSeconds(opts.ctime));
     // If-Match optimistic concurrency: a remote changed since this etag returns 412.
     if (opts?.ifMatchEtag) headers['If-Match'] = `"${opts.ifMatchEtag.replace(/^"|"$/g, '')}"`;
 
@@ -593,7 +599,7 @@ export class NextcloudClient implements IWebDAVClient {
 
   async uploadChunked(
     remotePath: string, data: ArrayBuffer, chunkSizeBytes: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number },
   ): Promise<void> {
     const uploadId = `obsidian-${this.settings.deviceId.slice(-8)}-${Date.now()}`;
     const sessionUrl = `${this.davBase('uploads')}/${uploadId}`;
@@ -637,6 +643,11 @@ export class NextcloudClient implements IWebDAVClient {
       // If-Match optimistic concurrency on the assembling MOVE (mirrors uploadFile): a remote
       // changed since this etag returns 412, mapped below to PreconditionFailedError.
       if (opts?.ifMatchEtag) moveHeaders['If-Match'] = `"${opts.ifMatchEtag.replace(/^"|"$/g, '')}"`;
+      // Same rules as uploadFile: the MOVE carries the times, and whatever the server does not acknowledge is set afterwards.
+      const sentMtime = opts?.mtime ? Math.floor(opts.mtime / 1000) : null;
+      const sentCtime = opts?.ctime !== undefined && isValidCreationMs(opts.ctime) ? creationSeconds(opts.ctime) : null;
+      if (sentMtime !== null) moveHeaders['X-OC-MTime'] = String(sentMtime);
+      if (sentCtime !== null) moveHeaders['X-OC-CTime'] = String(sentCtime);
       const move = await this.req({
         url: `${sessionUrl}/.file`,
         method: 'MOVE',
@@ -651,6 +662,8 @@ export class NextcloudClient implements IWebDAVClient {
         throw (parentMissing && dirError) ? dirError : new NetworkError(move.status, move.text, 'MOVE');
       }
 
+      await this.completeAssembledTimes(remotePath, move.headers, sentMtime, sentCtime);
+
       // Verify the checksum after assembly (FR-012), passing the precomputed hash to avoid hashing the buffer twice.
       await this.verifyRemoteChecksum(remotePath, data, sum);
     } catch (err) {
@@ -658,6 +671,51 @@ export class NextcloudClient implements IWebDAVClient {
       await this.req({ url: sessionUrl, method: 'DELETE', headers: { Authorization: this.authHeader, ...NO_CACHE_HEADERS }, throw: false }).catch(() => undefined);
       throw err;
     }
+  }
+
+  // PROPPATCH for the attributes the assembling MOVE did not acknowledge with `accepted`; only attributes that were sent are
+  // completed. Best-effort: a failure is logged and never fails the upload.
+  private async completeAssembledTimes(
+    remotePath: string, headers: Record<string, string> | undefined, mtimeSec: number | null, ctimeSec: number | null,
+  ): Promise<void> {
+    const accepted = (name: string): boolean => {
+      const key = Object.keys(headers ?? {}).find((k) => k.toLowerCase() === name);
+      return key !== undefined && (headers?.[key] ?? '').trim().toLowerCase() === 'accepted';
+    };
+    const props: string[] = [];
+    if (mtimeSec !== null && !accepted('x-oc-mtime')) props.push(`<d:lastmodified>${mtimeSec}</d:lastmodified>`);
+    if (ctimeSec !== null && !accepted('x-oc-ctime')) props.push(`<nc:creation_time>${ctimeSec}</nc:creation_time>`);
+    if (props.length === 0) return;
+    try {
+      const res = await this.proppatch(remotePath, props.join(''));
+      if (res.status !== 207) console.warn(`PROPPATCH after chunked upload failed: HTTP ${res.status} ${remotePath}`);
+    } catch (err) {
+      console.warn(`PROPPATCH after chunked upload failed: ${remotePath}`, err);
+    }
+  }
+
+  private proppatch(remotePath: string, propXml: string): Promise<RequestUrlResponse> {
+    return this.req({
+      url: this.remoteUrl(remotePath),
+      method: 'PROPPATCH',
+      headers: { Authorization: this.authHeader, 'Content-Type': 'application/xml; charset=utf-8', ...NO_CACHE_HEADERS },
+      body: `<?xml version="1.0" encoding="utf-8" ?>\n<d:propertyupdate xmlns:d="DAV:" xmlns:nc="${NC_NS}">\n  <d:set><d:prop>${propXml}</d:prop></d:set>\n</d:propertyupdate>`,
+      throw: false,
+    });
+  }
+
+  async setCreationTime(remotePath: string, seconds: number): Promise<'applied' | 'rejected'> {
+    const res = await this.proppatch(remotePath, `<nc:creation_time>${seconds}</nc:creation_time>`);
+    if (res.status === 207) {
+      try {
+        return readPropPatchOutcome(res.text, NC_NS, 'creation_time');
+      } catch (err) {
+        if (err instanceof MultistatusUnreadableError) throw new NetworkError(207, res.text, 'PROPPATCH');
+        throw err;
+      }
+    }
+    if ([400, 403, 405, 409, 415, 422, 501].includes(res.status)) return 'rejected';
+    throw new NetworkError(res.status, res.text, 'PROPPATCH');
   }
 
   // Fetches the remote checksum after upload and compares it with the local SHA-256; skipped if unavailable.
@@ -735,7 +793,8 @@ export class NextcloudClient implements IWebDAVClient {
       if (path === null || path === '') continue; // Skip entries outside the base folder or the folder itself
       const { etag, size, lastModified } = readDavProps(prop);
       const { checksum, fileId } = readOwncloudProps(prop);
-      results.push({ path, fileId, checksum, etag, size, lastModified });
+      const { creationTime } = readNextcloudProps(prop);
+      results.push({ path, fileId, checksum, etag, size, lastModified, creationTime });
     }
     return results;
   }
@@ -784,7 +843,8 @@ export class NextcloudClient implements IWebDAVClient {
       if (!prop) continue;
       const { etag, size, lastModified } = readDavProps(prop);
       const { checksum, fileId } = readOwncloudProps(prop);
-      modified.push({ path, fileId, checksum, etag, size, lastModified });
+      const { creationTime } = readNextcloudProps(prop);
+      modified.push({ path, fileId, checksum, etag, size, lastModified, creationTime });
     }
     return { modified, deleted, newSyncToken };
   }

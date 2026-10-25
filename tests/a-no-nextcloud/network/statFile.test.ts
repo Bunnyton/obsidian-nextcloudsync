@@ -104,6 +104,7 @@ describe('IWebDAVClient.statFile (C-0)', () => {
         etag: 'etag-abc123',
         size: 42,
         lastModified: new Date('Mon, 12 Jan 2026 10:00:00 GMT').getTime(),
+        creationTime: 0,
       });
     });
 

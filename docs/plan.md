@@ -47,6 +47,7 @@ flowchart TD
 | Local FS + Vault cache enumeration | `data/LocalAdapter.ts` |
 | Persisted per-file state and sync token | `data/StateDB.ts` |
 | Tuning constants | `util/limits.ts` |
+| Creation time: pure decision, execution (port `CreationTimePort`), platform probe | `util/creationTime.ts`, `sync/ctime/CreationTimeAligner.ts`, `data/creationTimeProbe.ts` |
 | Community-plugin paths: the four bundle files, parsing `plugins/<id>/<file>`, the own-folder and state-DB exclusion | `sync/plugins/pluginPaths.ts` (pure) |
 | Direction of a plugin bundle (local / remote / hold) and the per-file action for it | `sync/plugins/bundleDirection.ts` (pure) |
 | Reading `manifest.json` and `community-plugins.json`; deciding which listed plugins are ignored and why | `sync/plugins/pluginCatalog.ts` |
@@ -233,6 +234,11 @@ The `SyncEngine` methods below delegate to extracted services (see §17); the be
   That the platform honours the option (adapter stat and vault cache, after the tmp-write rename and after `modifyBinary`) is checked
   on real Obsidian by `tests/b2-nextcloud-ui/scenarios/writeMtimeContract.b2.test.ts` (desktop) and
   `tests/b3-android-ui/scenarios/writeMtimeContract.b3.test.ts` (Android).
+- **Creation time of a write and an upload** (docs/spec.md §9.7) — `writeCreationTimeMs` (pure, `src/util/creationTime.ts`) gives the creation time for a body written
+  locally, and `LocalAdapter.atomicWrite()` / `atomicWriteBinary()` take it as an optional argument. It is applied only on a platform whose
+  support is `settable`; otherwise the write time applies. `uploadCreationTimeMs` gives the `ctime` option of the upload strategy, which
+  becomes `X-OC-CTime` (see §10); it is `undefined` (no header) when the server value is unknown or neither side is valid. On a path where the
+  body was not sent (a fetched body equal to the local file, a converged compare), `CreationTimeAligner.align` runs afterwards (§18.5).
 - **`manifest.json` is written last.** Obsidian reads a plugin's `manifest.json` to decide that the plugin is installed and at which version, so
   it must not appear before `main.js` and `styles.css`. The pure `partitionPluginManifestsLast()` splits a list stably into the rest and the
   `plugins/<id>/manifest.json` items, and it is applied in three places: `incrementalSync` orders `eligible` as `[...rest, ...manifests]` before
@@ -385,6 +391,10 @@ flowchart TD
   MKCOLed and the PUT is retried once (a `createdDirs` cache avoids repeated MKCOL).
 - **Chunked** (`NextcloudClient.uploadChunked`): `CHUNK_SIZE_BYTES = 10MB`, assembled with `MOVE .file`, checksum verified after
   assembly, and on failure it falls back to a single PUT.
+- **Creation time on upload**: `uploadFile` adds `X-OC-CTime` (Unix seconds) beside `X-OC-MTime` when `opts.ctime` is a valid value (`isValidCreationMs`);
+  an invalid value is not sent. The assembling `MOVE .file` of `uploadChunked` carries the same `X-OC-MTime` / `X-OC-CTime` headers. Whatever the
+  server does not acknowledge with `accepted` in the response header is completed afterwards by `completeAssembledTimes`, a best-effort PROPPATCH
+  (`d:lastmodified`, `nc:creation_time`) whose failure is logged and never fails the upload.
 - **Bulk upload is not wired into the upload path.** `hasBulkUpload` is *detected* from the capabilities
   (`dav.bulkupload`), but the strategy selector returns only Simple or Chunked, and no bulk threshold constants or
   `bulkUploadEnabled` setting exist in `src/`. Treat bulk as a hook for the future.
@@ -434,6 +444,10 @@ remoteFileId, isConflicted, localMtime?, localSize?, remoteMtime? }`.
   scan is a real one instead of a short-circuit, and then stores the new value. `StateDB.getSyncScopeFingerprint()` / `setSyncScopeFingerprint()`
   mark the state dirty like `setRemoteRootEtag`, and `resetVaultIndex` clears the field with the root ETag. The root ETag is also cleared at the end of a
   session when any listed plugin was ignored or a restart is still pending, because those states change without any remote change.
+- **`ctimeLocalAttempt` / `ctimeRemoteAttempt`** (`FileState`, optional) hold the target creation time, in Unix seconds, of the last local fix the
+  platform did not apply and of the last server update the server rejected (docs/spec.md §9.7). `CreationTimeAligner` records one only on an
+  `ineffective` / `rejected` / failed attempt, and a planned fix to the same target is then skipped. It removes the field when a fix to the
+  target is applied; a different target is always tried again.
 - `SyncSessionSummary` aggregates the counts (uploaded/downloaded/deleted/merged/conflicted/error) + `retriedFiles`
   + `errors[]` and is reflected in the Sync Status dialog and the debug log.
 
@@ -575,6 +589,9 @@ separate modules. `SyncEngine.ts` keeps orchestration and the per-file decision;
 | `src/sync/identity/contentIdentity.ts` | Proof that local and remote content are identical, and the converged baseline | Functions |
 | `src/sync/mirror/MirrorService.ts` | Mirror from remote (plan and apply) | Class |
 | `src/sync/plugins/PluginSyncCoordinator.ts` | Community-plugin session: catalog, per-plugin direction, `fileAction`, `conflictRuleFor`, restart set and notices | Class (**owns the session state and the awaiting-restart set**); implements `PluginPathGate`, `LocalWritePort`, `PluginSessionPort` |
+| `src/util/creationTime.ts` | Valid-value check, aligned target, `writeCreationTimeMs` / `uploadCreationTimeMs`, `planCreationTimeAlignment` | **Pure functions only** |
+| `src/sync/ctime/CreationTimeAligner.ts` | **Execution** of the creation-time plan (local and server fix, State record); port `CreationTimePort` | Class (dependency injection) |
+| `src/data/creationTimeProbe.ts` | One-time classification of the platform (`settable` / `readOnly` / `untrusted`) | Free function |
 | `src/sync/SyncEngine.ts` | **Core loop** (3-point comparison, state transitions, plan execution), the **lifetime of the session**, the composition root, and delegation | Class |
 
 ### §17.1 Conventions the modules follow
@@ -615,6 +632,9 @@ graph TD
   Watch --> Transfer
   Watch --> Deletion
   Conflict --> Session[session/*]
+  Transfer -->|CreationTimePort| Ctime[ctime/CreationTimeAligner]
+  Conflict -->|CreationTimePort| Ctime
+  Resolution -->|CreationTimePort| Ctime
   Transfer --> Session
   Dir --> Session
   Deletion --> Session
@@ -765,6 +785,26 @@ selection logic in `ui/pluginSelection`. The execution (reading `manifest.json` 
 `stat`, notices, logging, the awaiting-restart set) lives in `PluginSyncCoordinator`, and the transfers themselves stay in `SyncEngine` and
 `TransferService`. The coordinator gathers facts and calls the pure functions; it holds no decision table of its own, so directions and
 actions are tested as tables without a vault or a server.
+
+### §18.5 Creation-time alignment (`src/sync/ctime/`)
+
+The creation time (docs/spec.md §9.7) follows the same decision/execution split.
+
+- **Decision**: `planCreationTimeAlignment` (`src/util/creationTime.ts`, pure). It takes the local ctime, the server `creationTime`, whether the
+  platform can set a local creation time, and the two attempted targets recorded in State (§12). It returns `{ setLocalSeconds, setRemoteSeconds }`,
+  each a target in seconds or `null`. The target is the oldest valid value of the two; an unknown server value, or no valid value, plans nothing.
+  A side is planned only when it differs from the target and was not already tried for that target. The local side is planned only on a
+  `settable` platform.
+- **Execution**: `CreationTimeAligner.align(client, remote, localStat?)` (the `CreationTimePort` implementation, created by `SyncEngine`). It reads the
+  stat (or takes the caller's fresh one), asks `LocalAdapter.creationTimeSupport()`, calls the plan, then applies it: `LocalAdapter.setCreationTime`
+  for the local side and `client.setCreationTime` (PROPPATCH `nc:creation_time`) for the server side. It never throws; every failure is logged.
+  The WebDAV client is a parameter, not a field (§17.1).
+- **Outcomes**: a local fix on a file being edited is deferred and the stored root ETag is cleared so the next sync retries. An `ineffective` local
+  result or a `rejected` server result records the target as `ctimeLocalAttempt` / `ctimeRemoteAttempt`; an applied fix removes the record (a
+  local fix also refreshes the stored `localMtime` / `localSize`). A thrown server error clears the root ETag.
+- **Callers**: `TransferService`, `ConflictApplier`, `ResolutionService` and the engine call `align` after a path where the body was not sent.
+  They receive it only as the `CreationTimePort` (§17.2). The platform classification (`settable` / `readOnly` / `untrusted`) is computed once by
+  `probeCreationTimeSupport` (`src/data/creationTimeProbe.ts`) and cached by `LocalAdapter`.
 
 ## §19. Layer structure
 

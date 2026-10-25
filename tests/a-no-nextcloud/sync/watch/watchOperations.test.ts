@@ -210,6 +210,17 @@ describe('WatchOperations.syncSingleFile — deciding whether a round-trip is wo
     expect(calls.processed).toEqual([]);
   });
 
+  it('[SPEC:CT-4] hands the upload a synthetic remote with creationTime 0 when the file is not on the server', async () => {
+    const remotes: RemoteFileInfo[] = [];
+    const transfer = {
+      uploadFile: async (_c: unknown, _u: unknown, _p: string, _h: string, _r: string, _t: string, r: RemoteFileInfo) => { remotes.push(r); },
+    } as unknown as TransferService;
+    const { watch } = build({ localContent: 'brand new', onServer: null }, { transfer });
+    await watch.syncSingleFile('note.md');
+    expect(remotes).toHaveLength(1);
+    expect(remotes[0].creationTime).toBe(0);
+  });
+
   it('does nothing for an excluded path', async () => {
     const { watch, calls } = build({ localContent: 'x' }, { isSystemExcluded: () => true });
     await watch.syncSingleFile('.obsidian/plugins/other/main.js');

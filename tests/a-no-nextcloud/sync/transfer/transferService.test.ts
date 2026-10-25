@@ -34,6 +34,8 @@ interface Opts {
   hasLocking?: boolean;
   oversize?: boolean;
   base?: FileState;
+  // Creation time (ms) the local file has before the write; omitted = the stat carries none.
+  localCtime?: number;
 }
 
 function build(o: Opts = {}, over: Partial<TransferDeps> = {}) {
@@ -43,6 +45,9 @@ function build(o: Opts = {}, over: Partial<TransferDeps> = {}) {
     unlocked: [] as string[],
     wrote: [] as string[],
     writeMtime: [] as Array<number | undefined>,
+    writeCtime: [] as Array<number | undefined>,
+    uploadOpts: [] as Array<Record<string, unknown> | undefined>,
+    order: [] as string[],
     setFile: [] as FileState[],
     history: [] as string[],
     retries: [] as string[],
@@ -72,7 +77,8 @@ function build(o: Opts = {}, over: Partial<TransferDeps> = {}) {
   } as unknown as IWebDAVClient;
 
   const uploadStrategy = {
-    upload: async (_c: unknown, path: string, _d: unknown, _m: number, opts?: { ifMatchEtag?: string | null }) => {
+    upload: async (_c: unknown, path: string, _d: unknown, _m: number, opts?: { ifMatchEtag?: string | null; ctime?: number }) => {
+      calls.uploadOpts.push(opts);
       calls.put.push({ path, ifMatch: opts?.ifMatchEtag });
       return o.upload ?? 'uploaded';
     },
@@ -80,15 +86,15 @@ function build(o: Opts = {}, over: Partial<TransferDeps> = {}) {
 
   const deps: TransferDeps = {
     localAdapter: {
-      stat: async () => (onDisk == null ? null : { size: onDisk.length, mtime: 1234 }),
+      stat: async () => (onDisk == null ? null : { size: onDisk.length, mtime: 1234, ctime: o.localCtime }),
       readBinary: async () => new TextEncoder().encode(onDisk ?? '').buffer,
-      atomicWriteBinary: async (p: string, d: ArrayBuffer, mtime?: number) => {
-        calls.wrote.push(p); calls.writeMtime.push(mtime); onDisk = new TextDecoder().decode(d);
+      atomicWriteBinary: async (p: string, d: ArrayBuffer, mtime?: number, ctime?: number) => {
+        calls.order.push('write'); calls.wrote.push(p); calls.writeMtime.push(mtime); calls.writeCtime.push(ctime); onDisk = new TextDecoder().decode(d);
       },
     } as unknown as TransferDeps['localAdapter'],
     stateDB: {
       getFile: () => o.base,
-      setFile: (f: FileState) => { calls.setFile.push(f); },
+      setFile: (f: FileState) => { calls.order.push('setFile'); calls.setFile.push(f); },
     } as unknown as TransferDeps['stateDB'],
     localWrite: passThroughLocalWrite,
     journal: Object.assign(new SyncJournal({}), {
@@ -312,5 +318,133 @@ describe('[SPEC:CPS-19] downloadFile writes through LocalWritePort', () => {
     await transfer.downloadFile(client, remote({ size: body.byteLength }), 'rid', 'etag', summary());
     expect(calls.wrote).toEqual([]);
     expect(localWrite.written).toHaveBeenCalledTimes(0);
+  });
+});
+
+describe('[SPEC:CT-2] downloadFile writes the earlier of the local and server creation times', () => {
+  const T_NEW = 1700000000000;
+  const T_OLD = 1690000000000;
+  const bodyOf = () => new TextEncoder().encode('remote body').buffer;
+
+  async function ctimeArg(o: Opts, creationTime: number | undefined): Promise<number | undefined> {
+    const { transfer, client, calls } = build({ remoteBody: bodyOf(), ...o });
+    await transfer.downloadFile(client, remote({ size: 11, creationTime }), 'rid', 'etag', summary());
+    expect(calls.writeCtime).toHaveLength(1);
+    return calls.writeCtime[0];
+  }
+
+  it('passes the server value for a new download (nothing on disk before)', async () => {
+    expect(await ctimeArg({ localContent: null }, T_NEW)).toBe(T_NEW);
+  });
+
+  it('keeps the older local creation time when overwriting', async () => {
+    expect(await ctimeArg({ localCtime: T_OLD }, T_NEW)).toBe(T_OLD);
+  });
+
+  it('takes the server value when the local creation time is newer', async () => {
+    expect(await ctimeArg({ localCtime: T_NEW }, T_OLD)).toBe(T_OLD);
+  });
+
+  it('keeps the pre-write local value when the server gave none', async () => {
+    expect(await ctimeArg({ localCtime: T_OLD }, undefined)).toBe(T_OLD);
+  });
+
+  it('passes undefined (write time applies) when neither side is valid', async () => {
+    expect(await ctimeArg({}, undefined)).toBeUndefined();
+    expect(await ctimeArg({ localCtime: 0 }, 0)).toBeUndefined();
+  });
+
+  it('leaves the mtime argument as before (a data.json gets the write time as mtime, the creation time still aligns) [SPEC:CPS-19]', async () => {
+    const localWrite = { mtimeFor: jest.fn(() => 5000), written: jest.fn() };
+    const { transfer, client, calls } = build({ remoteBody: bodyOf(), localContent: null }, { localWrite });
+    await transfer.downloadFile(
+      client, remote({ path: 'plugins/p/data.json', size: 11, lastModified: 2000, creationTime: T_NEW }), 'rid', 'etag', summary(),
+    );
+    expect(calls.writeMtime).toEqual([5000]);
+    expect(calls.writeCtime).toEqual([T_NEW]);
+  });
+});
+
+describe('[SPEC:CT-6] downloadFile aligns the creation time after the write', () => {
+  it('calls align(client, remote) once with no third argument, after setFile', async () => {
+    const align = jest.fn(async (_c: IWebDAVClient, _r: RemoteFileInfo) => { /* replaced below to log into the shared order */ });
+    const { transfer, client, calls } = build({}, { creationTime: { align } });
+    align.mockImplementation(async () => { calls.order.push('align'); });
+    const r = remote({ size: 11, creationTime: 1700000000000 });
+    await transfer.downloadFile(client, r, 'rid', 'etag', summary());
+    expect(align).toHaveBeenCalledTimes(1);
+    expect(align.mock.calls[0]).toHaveLength(2);
+    expect(align).toHaveBeenCalledWith(client, r);
+    expect(calls.order).toEqual(['write', 'setFile', 'align']);
+  });
+
+  it('does not throw when no aligner is wired', async () => {
+    const { transfer, client, calls } = build({});
+    await expect(transfer.downloadFile(client, remote({ size: 11, creationTime: 1700000000000 }), 'rid', 'etag', summary())).resolves.toBeUndefined();
+    expect(calls.wrote).toEqual(['note.md']);
+  });
+});
+
+describe('[SPEC:CT-6] downloadFile converges the creation time when the body is identical', () => {
+  it('calls align(client, remote, localStat) once after setFile and does not write the body', async () => {
+    const body = new TextEncoder().encode('same').buffer;
+    const align = jest.fn(async (_c: IWebDAVClient, _r: RemoteFileInfo, _s?: unknown) => { /* logged below */ });
+    const { transfer, client, calls } = build({ remoteBody: body, localContent: 'same', localCtime: 1700000000000 }, { creationTime: { align } });
+    align.mockImplementation(async () => { calls.order.push('align'); });
+    const r = remote({ size: body.byteLength, creationTime: 1690000000000 });
+    await transfer.downloadFile(client, r, 'rid', 'etag', summary());
+    expect(calls.wrote).toEqual([]);
+    expect(align).toHaveBeenCalledTimes(1);
+    expect(align).toHaveBeenCalledWith(client, r, { size: 4, mtime: 1234, ctime: 1700000000000 });
+    expect(calls.order).toEqual(['setFile', 'align']);
+  });
+
+  it('does not throw when no aligner is wired', async () => {
+    const body = new TextEncoder().encode('same').buffer;
+    const { transfer, client, calls } = build({ remoteBody: body, localContent: 'same' });
+    await expect(transfer.downloadFile(client, remote({ size: body.byteLength }), 'rid', 'etag', summary())).resolves.toBeUndefined();
+    expect(calls.wrote).toEqual([]);
+  });
+});
+
+describe('[SPEC:CT-4] uploadFile sends the creation time with the PUT', () => {
+  const T_NEW = 1700000000000;
+  const T_OLD = 1690000000000;
+
+  async function optsOf(localCtime: number | undefined, over: Partial<RemoteFileInfo>) {
+    const { transfer, client, uploadStrategy, calls } = build({ localCtime });
+    await transfer.uploadFile(client, uploadStrategy, 'note.md', 'h', 'r', 'etag', remote(over), summary());
+    expect(calls.uploadOpts).toHaveLength(1);
+    return calls.uploadOpts[0];
+  }
+
+  it('passes exactly { ifMatchEtag, ctime } as the fifth argument', async () => {
+    const opts = await optsOf(T_OLD, { etag: '"r9"', creationTime: T_NEW });
+    expect(opts).toEqual({ ifMatchEtag: '"r9"', ctime: T_OLD });
+  });
+
+  it('sends ctime undefined when the server value is unknown', async () => {
+    const opts = await optsOf(T_OLD, { creationTime: undefined });
+    expect(opts).toEqual({ ifMatchEtag: '"e1"', ctime: undefined });
+  });
+
+  it('sends the local value when the server holds 0 and the local value is valid', async () => {
+    const opts = await optsOf(T_NEW, { creationTime: 0 });
+    expect(opts?.ctime).toBe(T_NEW);
+  });
+
+  it('sends the server value when it is older than the local one', async () => {
+    const opts = await optsOf(T_NEW, { creationTime: T_OLD });
+    expect(opts?.ctime).toBe(T_OLD);
+  });
+
+  it('sends the local value when it is older than the server one', async () => {
+    const opts = await optsOf(T_OLD, { creationTime: T_NEW });
+    expect(opts?.ctime).toBe(T_OLD);
+  });
+
+  it('sends ctime undefined when neither side is valid', async () => {
+    const opts = await optsOf(undefined, { creationTime: 0 });
+    expect(opts?.ctime).toBeUndefined();
   });
 });

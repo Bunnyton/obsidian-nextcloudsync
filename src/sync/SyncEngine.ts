@@ -1,4 +1,6 @@
 import { App, Notice, Platform, apiVersion } from 'obsidian';
+import { CreationTimeAligner } from './ctime/CreationTimeAligner';
+import { uploadCreationTimeMs } from '../util/creationTime';
 import {
   DavSyncSettings,
   FileState,
@@ -117,6 +119,8 @@ export class SyncEngine {
   private readonly journal: SyncJournal;
 
   private readonly mergeBase: MergeBaseRecorder;
+  // One aligner shared by transfer, resolution and conflicts (docs/spec.md §9.7).
+  private readonly creationTime: CreationTimeAligner;
   private readonly transfer: TransferService;
 
   private readonly versions: VersionService;
@@ -188,7 +192,14 @@ export class SyncEngine {
       autoMergeFileTypes: () => this.opts.settings.autoMergeFileTypes,
       isPluginPath: (p) => this.plugins.isPluginPath(p),
     });
+    this.creationTime = new CreationTimeAligner({
+      localAdapter: opts.localAdapter,
+      stateDB: opts.stateDB,
+      isBeingEdited: (p) => this.opts.isBeingEdited?.(p) ?? false,
+      logger: opts.logger,
+    });
     this.transfer = new TransferService({
+      creationTime: this.creationTime,
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
       localWrite: this.plugins,
@@ -214,6 +225,7 @@ export class SyncEngine {
       logger: opts.logger,
     });
     this.resolution = new ResolutionService({
+      creationTime: this.creationTime,
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
       historyStore: opts.historyStore,
@@ -227,6 +239,7 @@ export class SyncEngine {
       logger: opts.logger,
     });
     this.conflicts = new ConflictApplier({
+      creationTime: this.creationTime,
       app: opts.app,
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
@@ -994,6 +1007,7 @@ export class SyncEngine {
         && localStat.size === remote.size && checksumProvesIdentical(remote, localHash)) {
       void this.opts.logger?.log(`sync: content identical to the remote (checksum) → state converged, no transfer → ${remote.path}`);
       this.opts.stateDB.setFile(await this.withLocalSignature(convergedState(remote, localHash, localStat), remote.lastModified));
+      await this.creationTime.align(this.client!, remote, localStat);
       return;
     }
 
@@ -1011,6 +1025,7 @@ export class SyncEngine {
       if (base?.isConflicted) {
         this.opts.stateDB.setFile({ ...base, isConflicted: false });
       }
+      await this.creationTime.align(this.client!, remote, localStat);
       return;
     }
 
@@ -1160,7 +1175,9 @@ export class SyncEngine {
     path: string, remote: RemoteFileInfo, remoteData: ArrayBuffer,
     remoteId: string, idType: FileState['idType'], summary: SyncSessionSummary,
   ): Promise<void> {
-    return this.conflicts.resolveByPreferRemote(path, remote, remoteData, remoteId, idType, summary);
+    return this.conflicts.resolveByPreferRemote(
+      path, remote, remoteData, remoteId, idType, summary, this.currentConnection().client,
+    );
   }
 
   private resolveByWrite(
@@ -1216,7 +1233,7 @@ export class SyncEngine {
         try {
           await this.uploadFile(
             path, localHash, remoteId, idType,
-            { path, fileId: base?.remoteFileId ?? null, checksum: null, etag: null, size: st.size, lastModified: st.mtime },
+            { path, fileId: base?.remoteFileId ?? null, checksum: null, etag: null, size: st.size, lastModified: st.mtime, creationTime: 0 },
             summary,
           );
         } catch (err) {
@@ -1374,7 +1391,10 @@ export class SyncEngine {
           const data = await this.opts.localAdapter.readBinary(path);
           // Hash from the bytes just read; reused for the OC-Checksum upload header so the client does not hash twice.
           const localHash = await sha256(data);
-          const outcome = await this.uploadStrategy!.upload(this.client!, path, data, lf.mtime, { precomputedSha256: localHash });
+          // The local creation time is read before the upload; a server value for the same path is honoured (docs/spec.md §9.7).
+          const before = await this.opts.localAdapter.stat(path);
+          const ctime = uploadCreationTimeMs(before?.ctime, remoteMap.get(path)?.creationTime ?? 0);
+          const outcome = await this.uploadStrategy!.upload(this.client!, path, data, lf.mtime, { precomputedSha256: localHash, ctime });
           if (outcome === 'skipped') { this.tickProgress(); return; }
           summary.uploadedCount++;
           this.recordHistory(path, 'uploaded');
@@ -1405,6 +1425,7 @@ export class SyncEngine {
         path, localHash: remote.checksum!, remoteId: remote.checksum!, idType: 'sha256',
         size: lf.size, mtime, remoteFileId: remote.fileId, isConflicted: false,
       }, remote.lastModified));
+      await this.creationTime.align(this.client!, remote);
     }
 
     await this.resolvePlannedConflicts(cf.rest, remoteMap, summary);

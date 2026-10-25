@@ -19,6 +19,8 @@ import { withLocalSignature } from '../../data/localSignature';
 import { isTextEligible } from '../policy';
 import { FileLogger } from '../../util/FileLogger';
 import { sha256 } from '../../util/hash';
+import { uploadCreationTimeMs, writeCreationTimeMs } from '../../util/creationTime';
+import type { CreationTimePort } from '../ctime/CreationTimeAligner';
 
 type CompareLocalSide = Pick<
   RemoteCompareResult,
@@ -32,6 +34,9 @@ export interface Connection {
 }
 
 export interface ResolutionDeps {
+  // Aligns the creation time of files whose body this sync left unchanged (docs/spec.md §9.7). Optional so tests
+  // can omit it; the engine always passes one.
+  creationTime?: CreationTimePort;
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary' | 'atomicWriteBinary'>;
   stateDB: Pick<StateDB, 'getFile' | 'setFile' | 'save' | 'countConflicted'>;
   // Chooses the mtime of a pulled body and is told after each write, exactly as in TransferService.
@@ -139,7 +144,10 @@ export class ResolutionService {
 
     const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
     try {
-      const outcome = await conn.uploadStrategy.upload(conn.client, path, localData, stat.mtime);
+      const outcome = await conn.uploadStrategy.upload(
+        conn.client, path, localData, stat.mtime,
+        { ctime: uploadCreationTimeMs(stat.ctime, remote ? remote.creationTime : 0) },
+      );
       if (outcome === 'skipped') throw new Error(`Upload skipped (over the size limit): ${path}`);
     } finally {
       await this.deps.transfer.releaseLock(conn.client, path, lockToken);
@@ -172,7 +180,10 @@ export class ResolutionService {
 
     const remoteData = await client.downloadFile(path);
     const writeMtime = this.deps.localWrite.mtimeFor(path, remote.lastModified || undefined);
-    await this.deps.localAdapter.atomicWriteBinary(path, remoteData, writeMtime);
+    const before = await this.deps.localAdapter.stat(path);
+    await this.deps.localAdapter.atomicWriteBinary(
+      path, remoteData, writeMtime, writeCreationTimeMs(before?.ctime, remote.creationTime),
+    );
     this.deps.localWrite.written(path);
 
     const localHash = await sha256(remoteData);
@@ -187,6 +198,7 @@ export class ResolutionService {
       size: remote.size, mtime,
       remoteFileId: remote.fileId, isConflicted: false,
     }, remote.lastModified));
+    await this.deps.creationTime?.align(client, remote);
     await this.deps.stateDB.save();
     await this.deps.historyStore?.save();
   }
@@ -249,17 +261,23 @@ export class ResolutionService {
   ): Promise<void> {
     const data = new TextEncoder().encode(content).buffer;
     const mtime = Date.now();
+    const before = await this.deps.localAdapter.stat(path);
     const remote = await this.fetchRemoteInfo(conn.client, path);
+    const rc = remote ? remote.creationTime : 0;
 
     const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
     try {
-      const outcome = await conn.uploadStrategy.upload(conn.client, path, data, mtime);
+      const outcome = await conn.uploadStrategy.upload(
+        conn.client, path, data, mtime, { ctime: uploadCreationTimeMs(before?.ctime, rc) },
+      );
       if (outcome === 'skipped') throw new Error(`Upload skipped (over the size limit): ${path}`);
     } finally {
       await this.deps.transfer.releaseLock(conn.client, path, lockToken);
     }
 
-    await this.deps.localAdapter.atomicWriteBinary(path, data, mtime);
+    await this.deps.localAdapter.atomicWriteBinary(
+      path, data, mtime, writeCreationTimeMs(before?.ctime, rc),
+    );
 
     const localHash = await sha256(data);
     this.deps.journal.recordHistory(path, 'uploaded', undefined, {

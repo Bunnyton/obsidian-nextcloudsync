@@ -171,6 +171,13 @@ export interface FileState {
   localSize?: number;
   /** Server `lastModified` at the last converged state, separate from `localMtime`. */
   remoteMtime?: number;
+  /**
+   * Target creation time (Unix seconds) of the last local creation-time fix that the platform did not apply
+   * (docs/spec.md §9.7). A planned local fix to the same target is skipped; any other target is tried.
+   */
+  ctimeLocalAttempt?: number;
+  /** Target creation time (Unix seconds) of the last server creation-time update the server rejected. */
+  ctimeRemoteAttempt?: number;
 }
 
 /** A tracked directory; `remoteFileId` (oc:fileid) is stable across MOVE for rename detection (docs/spec.md §8a.1). */
@@ -220,6 +227,12 @@ export interface RemoteFileInfo {
   etag: string | null;
   size: number;
   lastModified: number;
+  /**
+   * Server creation time in ms (nc:creation_time × 1000). 0 = the server holds none.
+   * undefined = not known in this listing (plain WebDAV, a listing rebuilt from State, a synthetic entry
+   * for a path the server is not known to have).
+   */
+  creationTime?: number;
 }
 
 /** A remote directory; `fileId` (oc:fileid) is stable across MOVE and identifies it for rename detection. */

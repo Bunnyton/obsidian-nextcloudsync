@@ -16,7 +16,8 @@ export interface SyncScopeInput {
 export function computeSyncScopeFingerprint(input: SyncScopeInput): string {
   const { syncConfigFolder, configSync, excludedFolders, syncedCommunityPlugins } = input;
   return JSON.stringify([
-    'scope-v1',
+    // Bump when a real scan must run once after an upgrade (v2: listings carry nc:creation_time, docs/spec.md §9.7).
+    'scope-v2',
     syncConfigFolder,
     syncConfigFolder ? Object.entries(configSync).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)) : [],
     [...excludedFolders].sort(),

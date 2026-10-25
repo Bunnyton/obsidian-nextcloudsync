@@ -3,6 +3,7 @@
 import { DataAdapter } from 'obsidian';
 import { SyncEngine } from '../../../src/sync/SyncEngine';
 import { StateDB } from '../../../src/data/StateDB';
+import type { CreationTimeSupport } from '../../../src/data/creationTimeProbe';
 import { DEFAULT_SETTINGS, FileState, RemoteFileInfo, SyncSessionSummary } from '../../../src/types';
 
 export const enc = new TextEncoder();
@@ -31,17 +32,41 @@ export function makeSummary(): SyncSessionSummary {
 
 // In-memory local vault. `files` maps path -> current content; a path that is absent means the file does
 // not exist locally. mtimes are fixed per path so the deterministic strategies are predictable.
-export function makeLocalAdapter(files: Record<string, string>, mtimes: Record<string, number> = {}) {
+// `ctimes` holds creation times per path; `support` is the platform creation-time capability the fake reports.
+export function makeLocalAdapter(
+  files: Record<string, string>,
+  mtimes: Record<string, number> = {},
+  ctimes: Record<string, number> = {},
+  support: CreationTimeSupport = 'untrusted',
+) {
   const mtimeOf = (p: string): number => mtimes[p] ?? 1_000;
+  const recordCtime = (p: string, ctime?: number): void => {
+    if (support === 'settable' && ctime !== undefined) ctimes[p] = ctime;
+  };
   return {
     files,
-    stat: jest.fn(async (p: string) =>
-      p in files ? { size: enc.encode(files[p]).length, mtime: mtimeOf(p) } : null),
+    ctimes,
+    stat: jest.fn(async (p: string) => {
+      if (!(p in files)) return null;
+      const base = { size: enc.encode(files[p]).length, mtime: mtimeOf(p) };
+      return support !== 'untrusted' && p in ctimes ? { ...base, ctime: ctimes[p] } : base;
+    }),
+    creationTimeSupport: jest.fn(async () => support),
+    setCreationTime: jest.fn(async (p: string, ms: number) => {
+      if (!(p in files)) return 'absent' as const;
+      if (support !== 'settable') return 'ineffective' as const;
+      ctimes[p] = ms;
+      return 'applied' as const;
+    }),
     exists: jest.fn(async (p: string) => p in files),
     read: jest.fn(async (p: string) => files[p] ?? ''),
     readBinary: jest.fn(async (p: string) => toBuf(files[p] ?? '')),
-    atomicWrite: jest.fn(async (p: string, d: string) => { files[p] = d; }),
-    atomicWriteBinary: jest.fn(async (p: string, d: ArrayBuffer) => { files[p] = dec.decode(d); }),
+    atomicWrite: jest.fn(async (p: string, d: string, _mtime?: number, ctime?: number) => {
+      files[p] = d; recordCtime(p, ctime);
+    }),
+    atomicWriteBinary: jest.fn(async (p: string, d: ArrayBuffer, _mtime?: number, ctime?: number) => {
+      files[p] = dec.decode(d); recordCtime(p, ctime);
+    }),
     writeBinary: jest.fn(async (p: string, d: ArrayBuffer) => { files[p] = dec.decode(d); }),
     remove: jest.fn(async (p: string) => { delete files[p]; }),
   };
