@@ -31,9 +31,9 @@ This plugin is still young and some behaviour can be rough around the edges. **P
 
 ---
 
-## What's new in this release (1.0.13-beta.3)
+## What's new in this release (1.0.13-beta.4)
 
-- **Creation times are kept across devices (1.0.13-beta.3)** — a downloaded file now keeps the creation time it has on the server instead of getting the time of the sync, and an upload sends the device's creation time to the server. When the device and the server disagree, both are set to the older value on the next sync, without transferring the file again, so files synced before this update are repaired as well. There is no setting. On platforms that cannot set a file's creation time (Linux desktop, for example), the creation time is not changed on that device and syncing works as before. A change of only the creation time can take up to 21 syncs to reach other devices.
+- **Large binary files no longer fail to sync (1.0.13-beta.4)** — after a transfer, files that are not merged as text (images, videos, PDFs, archives and so on) are no longer converted to text for the merge base. This removes wasted CPU time and memory, and fixes a sync failure for very large binaries that happened after the file had already been transferred. Markdown and Auto Merge files behave as before. There is no setting.
 
 For the full version history of every release, see the **[changelog](CHANGELOG.md)**.
 
