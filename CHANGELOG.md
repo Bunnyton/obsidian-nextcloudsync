@@ -11,6 +11,19 @@ and folded into the next stable entry.
 
 > A Japanese translation is available at [`CHANGELOG.ja.md`](CHANGELOG.ja.md).
 
+## [1.0.13] - 2026-10-27
+
+### Added
+- **Sync selected community plugins.** With **Sync config folder** ON, **Choose plugins…** lets each device pick the community plugins to sync; the list is empty by default, so nothing changes until you add one. Only `manifest.json`, `main.js`, `styles.css` and `data.json` of a listed plugin sync, and only between devices that list it. **Dangerous:** syncing a plugin copies its code to your other devices, where Obsidian runs it, so adding one asks for confirmation twice. When the code of an enabled plugin changes, you are asked to restart Obsidian, and its settings (`data.json`) wait until then. Plugins that are desktop-only on mobile, over the size limit, or need a newer Obsidian are skipped on that device. Which plugins are enabled stays local to each device.
+- **Creation times are kept across devices.** A downloaded file now keeps the creation time it has on the server instead of getting the time of the sync, and an upload sends the device's creation time to the server. When the device and the server disagree, both are set to the older value on the next sync, without transferring the file again, so files synced before this update are repaired as well. There is no setting. On platforms that cannot set a file's creation time (Linux desktop, for example), the creation time is not changed on that device and syncing works as before. A change of only the creation time can take up to 21 syncs to reach other devices.
+
+### Changed
+- **Public link shares are detected as Nextcloud.** A Server URL that points at a Nextcloud public link share (`/public.php/webdav/` or the newer `/public.php/dav/files/<token>/`) is now recognised as Nextcloud, so syncing uses the fast change detection (one listing request and the root-ETag shortcut) instead of walking every folder with a separate request. On a public share, version history and chunked upload stay off because they need the account's own endpoints; large files upload in a single request. A renamed (themed) Nextcloud whose OCS endpoint is blocked is now detected as well. No settings were added.
+- **Dependency update and a safer password-secret selection.** The libraries and the build and test toolchain are updated to their latest compatible versions. Clearing the selected password secret in the settings is now stored as "not set", so sign-in falls back to the default secret name exactly as before instead of keeping an invalid value. There is no setting and sync behaviour is unchanged.
+
+### Fixed
+- **Large binary files no longer fail to sync.** After a transfer, files that are not merged as text (images, videos, PDFs, archives and so on) are no longer converted to text for the merge base. This removes wasted CPU time and memory, and fixes a sync failure for very large binaries that happened after the file had already been transferred. Markdown and Auto Merge files behave as before. There is no setting.
+
 ## [1.0.12] - 2026-10-19
 
 ### Changed
@@ -497,6 +510,7 @@ Initial public releases (0.2.0 – 0.2.1) of the Nextcloud-specific sync engine:
 - **Clearer conflict outcomes in the dry-run** — the first-sync preview now explains what conflict resolution will produce, and each conflicted file is clickable to preview the exact merged before/after result.
 - **Faster than generic WebDAV** — by diffing content hashes against Nextcloud's `sync-token`, each sync transfers only what actually changed instead of recursively walking the entire remote tree on every run, so syncs complete noticeably faster than modification-time-based WebDAV plugins.
 
+[1.0.13]: https://github.com/siosig/obsidian-nextcloudsync/releases/tag/1.0.13
 [1.0.12]: https://github.com/siosig/obsidian-nextcloudsync/releases/tag/1.0.12
 [1.0.11]: https://github.com/siosig/obsidian-nextcloudsync/releases/tag/1.0.11
 [1.0.10]: https://github.com/siosig/obsidian-nextcloudsync/releases/tag/1.0.10
