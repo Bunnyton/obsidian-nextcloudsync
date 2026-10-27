@@ -34,6 +34,8 @@ export interface SettingDefinitionsHost {
   startLoginFlow(): unknown;
   addExcludedFolder(path: string): unknown;
   removeExcludedFolder(path: string): unknown;
+  openCommunityPluginPicker(): unknown;
+  removeSyncedCommunityPlugin(id: string): unknown;
 
   renderAppPassword(setting: Setting): unknown;
   renderNumberSlider(setting: Setting, opts: NumberSliderOptions): unknown;
@@ -71,6 +73,7 @@ export const RENDER_ONLY_ROWS = {
     'Sign-in help',
     'Manual sign-in',
     'Advanced warning',
+    'Community plugins warning',
   ] as string[],
   // Settings whose row is a `render` row, out of the key-integrity check's reach; listed so the reverse-direction check does not report them as missing.
   settingKeys: [
@@ -82,6 +85,7 @@ export const RENDER_ONLY_ROWS = {
     'maxFileSizeMB',
     'excludedFolders',         // list plus an add row with its own folder picker
     'autoMergeFileTypes',      // string[] shown comma-joined; needs a parse/format round-trip
+    'syncedCommunityPlugins',  // checklist of installed plugins; needs its own render
   ] as (keyof DavSyncSettings)[],
 } as const;
 
@@ -93,7 +97,8 @@ const CONFLICT_STRATEGY_OPTIONS = {
 } as const;
 
 // Called on every render (obsidian.d.ts:6577-6583), so the row set is dynamic: one row per excluded folder, and two
-// config-category rows only while the master toggle is on. The count is 27 + excludedFolders.length + (syncConfigFolder ? 2 : 0).
+// config-category rows, the community plugin warning, one row per synced plugin and `Choose plugins…` only while the master toggle is on.
+// The count is 27 + excludedFolders.length + (syncConfigFolder ? 2 + 2 + syncedCommunityPlugins.length : 0).
 export function buildSettingDefinitions(host: SettingDefinitionsHost): SettingDefinitionItem[] {
   return [
     topGroup(host),
@@ -360,7 +365,7 @@ function excludedFoldersGroup(host: SettingDefinitionsHost): SettingDefinitionGr
   const items: SettingGroupItem[] = [
     {
       name: 'Excluded folders',
-      desc: 'Folders that are never synced — neither uploaded nor downloaded. Matched by folder prefix at a folder boundary, additive on top of .git, .trash, the config plugins folder, and plugin state, which are already excluded automatically.',
+      desc: 'Folders that are never synced — neither uploaded nor downloaded. Matched by folder prefix at a folder boundary, additive on top of .git, .trash, this plugin\'s own folder, and community plugins you have not picked, which are already excluded automatically.',
       aliases: ['ignore', 'exclude', 'skip', 'blacklist', 'git'],
       render: (setting: Setting) =>
         host.renderReadOnly(setting, excluded.length ? `${excluded.length} excluded` : 'None'),
@@ -391,7 +396,7 @@ function configFolderGroup(host: SettingDefinitionsHost): SettingDefinitionGroup
   const items: SettingGroupItem[] = [
     {
       name: 'Sync config folder',
-      desc: `Opt in to syncing parts of the ${host.configDir} config folder across devices. Off by default — only notes and other vault files sync. Community plugins are never synced; their files stay device-local. A synced change to core-plugin settings may need an Obsidian restart to take effect on the other device.`,
+      desc: `Opt in to syncing parts of the ${host.configDir} config folder across devices. Off by default — only notes and other vault files sync. Community plugins sync only when you pick them below; everything else in the plugins folder stays device-local. A synced change to core-plugin settings may need an Obsidian restart to take effect on the other device.`,
       aliases: ['obsidian folder', 'appearance', 'themes', 'hotkeys', 'settings sync'],
       control: { type: 'toggle', key: 'syncConfigFolder' },
     },
@@ -407,10 +412,43 @@ function configFolderGroup(host: SettingDefinitionsHost): SettingDefinitionGroup
         control: { type: 'toggle', key: `configSync.${category.key}` },
       });
     }
+    items.push(...communityPluginRows(host));
   }
   return group(`Config folder (${host.configDir})`, items);
 }
 
+
+const COMMUNITY_PLUGINS_WARNING =
+  'Dangerous: syncing a community plugin copies its code (main.js) to your other devices, where Obsidian runs it. ' +
+  'A plugin changed on one device runs everywhere, and two devices with different plugin versions can damage each other\'s plugin settings. ' +
+  'Only sync plugins you trust, and restart Obsidian on a device when asked.';
+
+const COMMUNITY_PLUGINS_DESC =
+  'Pick community plugins to sync from the ones installed on this device or on the server. Only manifest.json, main.js, styles.css and data.json directly in each plugin folder sync; ' +
+  'other files stay device-local. Each device has its own list, and a plugin syncs only between devices that both list it. ' +
+  'Turning a plugin on or off (community-plugins.json) is never synced.';
+
+// Shown only while the master toggle is on: the warning, one row per synced plugin, then the picker entry.
+function communityPluginRows(host: SettingDefinitionsHost): SettingGroupItem[] {
+  const rows: SettingGroupItem[] = [
+    notice(host, 'Community plugins warning', COMMUNITY_PLUGINS_WARNING, { cls: 'ncs-setting-warning' }),
+  ];
+  for (const id of host.settings.syncedCommunityPlugins) {
+    rows.push({
+      name: id,
+      desc: 'Synced. Click to stop syncing this plugin on this device.',
+      searchable: false,
+      action: () => { void host.removeSyncedCommunityPlugin(id); },
+    });
+  }
+  rows.push({
+    name: 'Choose plugins…',
+    desc: COMMUNITY_PLUGINS_DESC,
+    aliases: ['plugins', 'community plugins', 'plugin sync', 'add plugin'],
+    action: () => { void host.openCommunityPluginPicker(); },
+  });
+  return rows;
+}
 
 function debugGroup(host: SettingDefinitionsHost): SettingDefinitionGroup {
   return group('Debug', [

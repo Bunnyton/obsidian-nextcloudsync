@@ -9,6 +9,7 @@
 import { MirrorService, MirrorDeps } from '../../../../src/sync/mirror/MirrorService';
 import { SyncJournal } from '../../../../src/sync/session/SyncJournal';
 import { MergeBaseRecorder } from '../../../../src/sync/session/MergeBaseRecorder';
+import { noopPluginSession } from '../../support/pluginPorts';
 import { TransferService } from '../../../../src/sync/transfer/TransferService';
 import { DeletionService } from '../../../../src/sync/deletion/DeletionService';
 import { LocalScanner } from '../../../../src/sync/scan/LocalScanner';
@@ -85,8 +86,10 @@ function build(over: Partial<MirrorDeps> = {}, tracked: FileState[] = []) {
     journal: new SyncJournal({}),
     mergeBase: {
       record: () => { /* noop */ },
+      recordBytes: () => { /* noop */ },
       drop: (p: string) => { calls.droppedBase.push(p); },
     } as unknown as MergeBaseRecorder,
+    plugins: noopPluginSession,
     transfer: {
       downloadFile: async (
         _c: IWebDAVClient, r: RemoteFileInfo, _id: string, _t: string, s: SyncSessionSummary,
@@ -122,7 +125,7 @@ describe('MirrorService.applyRemoteMirror — the refusal gate', () => {
     );
     expect(calls.deleted).toEqual([]);
     expect(calls.downloaded).toEqual([]);
-    expect(result).toEqual({ downloaded: 0, deleted: 0, skipped: 0, createdDirs: 0, errors: [] });
+    expect(result).toEqual({ downloaded: 0, deleted: 0, skipped: 0, createdDirs: 0, errors: [], pluginsNeedingRestart: [] });
   });
 
   it('reports the plan\'s skip count even on the refusal path', async () => {

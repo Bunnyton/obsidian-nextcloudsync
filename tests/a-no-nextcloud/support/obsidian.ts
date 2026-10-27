@@ -21,9 +21,10 @@ export class PluginSettingTab {
   constructor(app: App, plugin: Plugin) {
     this.app = app;
     this.plugin = plugin;
-    this.containerEl = document.createElement('div');
+    this.containerEl = new FakeEl() as unknown as HTMLElement;
   }
   display(): void {}
+  update(): void {}
 }
 
 // Captures the latest message, timeout and dismissal. `Notice.instances` (newest last) lets tests verify
@@ -179,7 +180,9 @@ export class Setting {
   nameEl = new FakeEl();
   descEl = new FakeEl();
   controlEl = new FakeEl();
+  components: unknown[] = [];
   constructor(_containerEl: HTMLElement) {}
+  addComponent<T>(cb: (el: HTMLElement) => T): this { this.components.push(cb(this.controlEl as unknown as HTMLElement)); return this; }
   setName(_name: string): this { return this; }
   setDesc(_desc: string): this { return this; }
   setHeading(): this { return this; }
@@ -188,6 +191,15 @@ export class Setting {
   addToggle(_cb: (_toggle: ToggleComponent) => void): this { return this; }
   addSlider(_cb: (_slider: SliderComponent) => void): this { return this; }
   addButton(_cb: (_btn: ButtonComponent) => void): this { return this; }
+}
+
+// Records the value and the change callback so tests can drive a selection or a cleared selection (null).
+export class SecretComponent {
+  value = '';
+  changeCb: ((value: string | null) => unknown) | null = null;
+  constructor(_app: App, _containerEl: HTMLElement) {}
+  setValue(value: string): this { this.value = value; return this; }
+  onChange(cb: (value: string | null) => unknown): this { this.changeCb = cb; return this; }
 }
 
 export function setTooltip(el: FakeEl, tooltip: string): void {
@@ -279,6 +291,7 @@ export function parseFrontMatterStringArray(frontmatter: any, key: string | RegE
 }
 
 // Mutable platform flags so tests can simulate desktop / iOS / Android.
+export const apiVersion = '1.13.7';
 export const Platform = {
   isMobile: false,
   isDesktop: true,

@@ -27,7 +27,7 @@ function makeStateAdapter(files: Record<string, string> = {}): DataAdapter {
 
 function makeSummary(): SyncSessionSummary {
   return { startedAt: 0, completedAt: null, uploadedCount: 0, downloadedCount: 0, deletedCount: 0,
-    mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], errors: [] };
+    mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], pluginsNeedingRestart: [], errors: [] };
 }
 
 const remoteOf = (path: string, size: number, over: Partial<RemoteFileInfo> = {}): RemoteFileInfo =>

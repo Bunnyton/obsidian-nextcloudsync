@@ -2,7 +2,7 @@
 // sees no difference. Planning and applying are separate calls; a plan that could not be built reliably
 // returns `ok: false` with no actions, so a failed remote listing yields ZERO deletions.
 import { TFolder, Vault, App, normalizePath } from 'obsidian';
-import { FileState, RemoteFileInfo, RemoteDirInfo } from '../../types';
+import { FileState, RemoteFileInfo, RemoteDirInfo, SyncSessionSummary } from '../../types';
 import { buildMirrorPlan, MirrorPlan, MirrorResult, LocalFileEntry } from '../mirrorPlan';
 import { planStateConvergence, planDirConvergence, leftoverFileState } from './convergence';
 import { LocalAdapter } from '../../data/LocalAdapter';
@@ -11,6 +11,7 @@ import { IStatusBar } from '../../ui/StatusBarItem';
 import { IWebDAVClient } from '../../network/IWebDAVClient';
 import { SyncJournal } from '../session/SyncJournal';
 import { MergeBaseRecorder } from '../session/MergeBaseRecorder';
+import type { PluginSessionPort } from '../plugins/PluginSyncCoordinator';
 import { TransferService } from '../transfer/TransferService';
 import { DeletionService } from '../deletion/DeletionService';
 import { LocalScanner } from '../scan/LocalScanner';
@@ -18,6 +19,7 @@ import { RemoteListingSource } from '../scan/RemoteListingSource';
 import { withLocalSignature } from '../../data/localSignature';
 import { FileLogger } from '../../util/FileLogger';
 import { sha256 } from '../../util/hash';
+import { partitionPluginManifestsLast } from '../plugins/pluginPaths';
 
 // A port because the counters are shared with an ordinary sync; the status bar must show one notion of progress.
 export interface MirrorProgress {
@@ -34,6 +36,7 @@ export interface MirrorDeps {
   statusBar: IStatusBar;
   journal: SyncJournal;
   mergeBase: MergeBaseRecorder;
+  plugins: PluginSessionPort;
   transfer: TransferService;
   deletion: DeletionService;
   localScanner: Pick<LocalScanner, 'collectLocalStats'>;
@@ -74,6 +77,19 @@ export class MirrorService {
       return buildMirrorPlan([], [], [], () => false, false, `Failed to list the remote: ${(err as Error).message}`);
     }
 
+    this.deps.plugins.begin();
+    try {
+      await this.deps.plugins.prepare(client, remoteFiles);
+      return await this.planFromListing(client, remoteFiles, remoteDirs, onPhase);
+    } finally {
+      this.deps.plugins.discard();
+    }
+  }
+
+  // Builds the plan once the plugin session has selected the listed plugins (they decide isSystemExcluded).
+  private async planFromListing(
+    client: IWebDAVClient, remoteFiles: RemoteFileInfo[], remoteDirs: RemoteDirInfo[], onPhase?: (label: string) => void,
+  ): Promise<MirrorPlan> {
     onPhase?.('Comparing with local files…');
     const localStats = new Map<string, { size: number; mtime: number }>();
     await this.deps.localScanner.collectLocalStats(localStats);
@@ -116,7 +132,7 @@ export class MirrorService {
   async applyRemoteMirror(
     client: IWebDAVClient, plan: MirrorPlan, onProgress?: (done: number, total: number) => void,
   ): Promise<MirrorResult> {
-    const result: MirrorResult = { downloaded: 0, deleted: 0, skipped: plan.skipCount, createdDirs: 0, errors: [] };
+    const result: MirrorResult = { downloaded: 0, deleted: 0, skipped: plan.skipCount, createdDirs: 0, errors: [], pluginsNeedingRestart: [] };
     if (!plan.ok) return result;
 
     const summary = this.deps.journal.newSummary();
@@ -134,20 +150,10 @@ export class MirrorService {
       onProgress?.(done, total);
     };
 
+    this.deps.plugins.begin();
     try {
-      // Remote wins: forced overwrite, not a 3-way merge.
-      for (const remote of plan.downloads) {
-        const remoteId = remote.checksum ?? remote.etag ?? String(remote.size);
-        const idType: FileState['idType'] = remote.checksum ? 'sha256' : (remote.etag ? 'etag' : 'size');
-        try {
-          const before = summary.downloadedCount;
-          await this.deps.transfer.downloadFile(client, remote, remoteId, idType, summary);
-          if (summary.downloadedCount > before) result.downloaded++;
-        } catch (err) {
-          result.errors.push({ path: remote.path, message: (err as Error).message });
-        }
-        tick();
-      }
+      await this.deps.plugins.prepare(client, plan.remoteFiles);
+      await this.runDownloads(client, plan, summary, result, tick);
 
       // Failures are judged after every deletion ran: a path can still disappear with its parent folder.
       const failedDeletes: Array<{ path: string; message: string; isDir: boolean }> = [];
@@ -161,7 +167,7 @@ export class MirrorService {
         }
         tick();
       };
-      for (const path of plan.deleteFiles) await removeLocal(path, false);
+      for (const path of plan.deleteFiles.filter((p) => !this.deps.isSystemExcluded(p))) await removeLocal(path, false);
       // Local-only folders, child to parent. Dir tracking is dropped inside processRemoteDeletion with the subtree's.
       for (const path of plan.deleteDirs) await removeLocal(path, true);
 
@@ -252,6 +258,7 @@ export class MirrorService {
       this.deps.stateDB.setRemoteRootEtag(null);
       this.deps.stateDB.setSyncToken('');
     } finally {
+      this.finishPlugins(result);
       await this.persistSafely(result);
     }
 
@@ -263,6 +270,36 @@ export class MirrorService {
       `mirror: applied — downloaded=${result.downloaded}, deleted=${result.deleted}, skipped=${result.skipped}, createdDirs=${result.createdDirs}, errors=${result.errors.length}`,
     );
     return result;
+  }
+
+  // Remote wins: forced overwrite, not a 3-way merge. Excluded paths (unlisted plugins, data.json of a plugin
+  // awaiting restart) are skipped, and plugin manifests go last so a plugin is only loadable once its files are in.
+  private async runDownloads(
+    client: IWebDAVClient, plan: MirrorPlan, summary: SyncSessionSummary, result: MirrorResult, tick: () => void,
+  ): Promise<void> {
+    const eligible = plan.downloads.filter((d) => !this.deps.isSystemExcluded(d.path));
+    const { rest, manifests } = partitionPluginManifestsLast(eligible, (d) => d.path, this.deps.app.vault.configDir);
+    for (const remote of [...rest, ...manifests]) {
+      const remoteId = remote.checksum ?? remote.etag ?? String(remote.size);
+      const idType: FileState['idType'] = remote.checksum ? 'sha256' : (remote.etag ? 'etag' : 'size');
+      try {
+        const before = summary.downloadedCount;
+        await this.deps.transfer.downloadFile(client, remote, remoteId, idType, summary);
+        if (summary.downloadedCount > before) result.downloaded++;
+      } catch (err) {
+        result.errors.push({ path: remote.path, message: (err as Error).message });
+      }
+      tick();
+    }
+  }
+
+  // Never throws: a failed plugin session end must not stop the state save.
+  private finishPlugins(result: MirrorResult): void {
+    try {
+      result.pluginsNeedingRestart = this.deps.plugins.finish().pluginsNeedingRestart;
+    } catch (err) {
+      void this.deps.logger?.log(`mirror: plugin session finish failed — ${(err as Error).message}`, 'error');
+    }
   }
 
   // Empty folders included; the vault root is not a folder to track.

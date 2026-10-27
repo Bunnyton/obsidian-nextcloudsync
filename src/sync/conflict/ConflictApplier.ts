@@ -5,7 +5,7 @@ import {
   FileState, RemoteFileInfo, SyncSessionSummary, SyncHistoryDetail, ConflictResolution,
   FileLockedError,
 } from '../../types';
-import { LocalAdapter } from '../../data/LocalAdapter';
+import { LocalAdapter, type LocalStat } from '../../data/LocalAdapter';
 import { StateDB } from '../../data/StateDB';
 import { MergeBaseStore } from '../../data/MergeBaseStore';
 import { IWebDAVClient } from '../../network/IWebDAVClient';
@@ -20,8 +20,11 @@ import { isMarkdown } from '../../util/mergeableExtensions';
 import { isAnomalousRemoteContent } from '../../util/limits';
 import { FileLogger } from '../../util/FileLogger';
 import { sha256 } from '../../util/hash';
+import { uploadCreationTimeMs, writeCreationTimeMs } from '../../util/creationTime';
 import { bytesEqual, checksumProvesIdentical, convergedState } from '../identity/contentIdentity';
+import type { LocalWritePort, PluginConflictRule } from '../plugins/PluginSyncCoordinator';
 import type { App } from 'obsidian';
+import type { CreationTimePort } from '../ctime/CreationTimeAligner';
 
 export interface Connection {
   client: IWebDAVClient;
@@ -29,6 +32,9 @@ export interface Connection {
 }
 
 export interface ConflictDeps {
+  // Aligns the creation time of files whose body this sync left unchanged (docs/spec.md §9.7). Optional so tests
+  // can omit it; the engine always passes one.
+  creationTime?: CreationTimePort;
   app: App;
   localAdapter: LocalAdapter;
   stateDB: Pick<StateDB, 'getFile' | 'setFile' | 'setRemoteRootEtag'>;
@@ -37,6 +43,9 @@ export interface ConflictDeps {
   mergeBase: MergeBaseRecorder;
   transfer: TransferService;
   resolution: Pick<ResolutionService, 'captureCleanSides'>;
+  localWrite: LocalWritePort;
+  // The conflict rule for a plugin file, or null for any other path.
+  pluginConflictRule(path: string): PluginConflictRule | null;
   // Read at call time so a settings change takes effect.
   resolverConfig(): MergeConfig;
   maxFileSizeMB(): number;
@@ -81,6 +90,14 @@ export class ConflictApplier {
       remoteMtime: remote.lastModified || 0,
     };
 
+    // Plugin files never enter text merge: the coordinator's rule decides without reading the local body.
+    const rule = this.deps.pluginConflictRule(path);
+    if (rule !== null) {
+      const ruled = this.decideByPluginRule(rule, path, ctx);
+      await this.applyDecision(conn, path, base, remote, remoteId, idType, summary, ruled, identity.remoteData);
+      return;
+    }
+
     // `merge` and every markdown file need both sides' text; the other strategies decide from size/mtime,
     // so their remote download is deferred until required.
     let remoteData: ArrayBuffer | undefined = identity.remoteData;
@@ -106,6 +123,28 @@ export class ConflictApplier {
       decision = resolver.decide(path, '', '', '', ctx);
     }
 
+    await this.applyDecision(conn, path, base, remote, remoteId, idType, summary, decision, remoteData);
+  }
+
+  private decideByPluginRule(
+    rule: PluginConflictRule, path: string,
+    ctx: { localSize: number; remoteSize: number; localMtime: number; remoteMtime: number },
+  ): ConflictResolution {
+    if (rule.kind === 'force') return { action: rule.action };
+    // No auto-merge types, so the strategy alone decides and no body is read.
+    const resolver = new ConflictResolver(this.deps.app, this.deps.localAdapter, {
+      ...this.deps.resolverConfig(), autoMergeFileTypes: [], otherFileStrategy: rule.strategy,
+    });
+    return resolver.decide(path, '', '', '', ctx);
+  }
+
+  private async applyDecision(
+    conn: Connection,
+    path: string, base: FileState | undefined, remote: RemoteFileInfo,
+    remoteId: string, idType: FileState['idType'], summary: SyncSessionSummary,
+    decision: ConflictResolution, fetched: ArrayBuffer | undefined,
+  ): Promise<void> {
+    let remoteData = fetched;
     switch (decision.action) {
       case 'safe-hold':
         // Markers would corrupt a non-text file: leave both sides untouched and flag it conflicted, with
@@ -131,7 +170,7 @@ export class ConflictApplier {
 
       case 'prefer-remote':
         if (!remoteData) remoteData = await conn.client.downloadFile(remote.path);
-        await this.resolveByPreferRemote(path, remote, remoteData, remoteId, idType, summary);
+        await this.resolveByPreferRemote(path, remote, remoteData, remoteId, idType, summary, conn.client);
         return;
 
       case 'write':
@@ -143,7 +182,7 @@ export class ConflictApplier {
   // Proof of identity is the server checksum, or the fetched body when the server has none and the sizes match.
   private async convergeIfIdentical(
     conn: Connection, path: string, remote: RemoteFileInfo,
-    localStat: { size: number; mtime: number } | null,
+    localStat: LocalStat | null,
   ): Promise<{ converged: boolean; remoteData?: ArrayBuffer }> {
     if (!localStat) return { converged: false };
     const localData = await this.deps.localAdapter.readBinary(path);
@@ -160,7 +199,8 @@ export class ConflictApplier {
     this.deps.stateDB.setFile(await withLocalSignature(
       this.deps.localAdapter, convergedState(remote, localHash, localStat), remote.lastModified,
     ));
-    this.deps.mergeBase.record(path, new TextDecoder().decode(localData));
+    this.deps.mergeBase.recordBytes(path, localData);
+    await this.deps.creationTime?.align(conn.client, remote, localStat);
     void this.deps.logger?.log(`conflict: content identical to the remote → state converged, no transfer → ${path}`);
     return { converged: true };
   }
@@ -173,7 +213,10 @@ export class ConflictApplier {
     // One merge time, read once: the local write, the X-OC-MTime of the upload and the stored state all use it.
     // (PROPPATCH of mtime is silently ignored on Nextcloud, so the upload header is what sets the remote time.)
     const mergeMtime = Date.now();
-    await this.deps.localAdapter.atomicWrite(path, content, mergeMtime);
+    const before = await this.deps.localAdapter.stat(path);
+    await this.deps.localAdapter.atomicWrite(
+      path, content, mergeMtime, writeCreationTimeMs(before?.ctime, remote.creationTime),
+    );
 
     // Without this push the merge stays local-only and every later sync re-detects the same conflict.
     const mergedData = await this.deps.localAdapter.readBinary(path);
@@ -182,7 +225,9 @@ export class ConflictApplier {
     try {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
-        const outcome = await conn.uploadStrategy.upload(conn.client, path, mergedData, mergeMtime);
+        const outcome = await conn.uploadStrategy.upload(conn.client, path, mergedData, mergeMtime, {
+          ctime: uploadCreationTimeMs(before?.ctime, remote.creationTime),
+        });
         if (outcome !== 'skipped') { summary.uploadedCount++; uploaded = true; this.deps.journal.recordHistory(path, 'uploaded'); }
       } finally {
         await this.deps.transfer.releaseLock(conn.client, path, lockToken);
@@ -242,7 +287,9 @@ export class ConflictApplier {
     try {
       const lockToken = await this.deps.transfer.acquireLock(conn.client, path);
       try {
-        const outcome = await conn.uploadStrategy.upload(conn.client, path, localData, mtime);
+        const outcome = await conn.uploadStrategy.upload(conn.client, path, localData, mtime, {
+          ctime: uploadCreationTimeMs(stat?.ctime, remote.creationTime),
+        });
         if (outcome === 'skipped') {
           // Skipped (e.g. size limit): leave the conflict unresolved.
           this.deps.queueRetry(path);
@@ -270,13 +317,14 @@ export class ConflictApplier {
       size: stat?.size ?? localData.byteLength, mtime,
       remoteFileId: remote.fileId, isConflicted: false,
     }, remote.lastModified));
-    this.deps.mergeBase.record(path, new TextDecoder().decode(localData));
+    this.deps.mergeBase.recordBytes(path, localData);
     void this.deps.logger?.log(`conflict: resolved by prefer-local (remote overwritten) → ${path}`);
   }
 
   async resolveByPreferRemote(
     path: string, remote: RemoteFileInfo, remoteData: ArrayBuffer,
     remoteId: string, idType: FileState['idType'], summary: SyncSessionSummary,
+    client?: IWebDAVClient,
   ): Promise<void> {
     // Never overwrite local with a body whose length disagrees with the advertised size (0-byte or truncated).
     if (isAnomalousRemoteContent(remote.size, remoteData.byteLength)) {
@@ -286,7 +334,12 @@ export class ConflictApplier {
       return;
     }
     try {
-      await this.deps.localAdapter.atomicWriteBinary(path, remoteData, remote.lastModified || undefined);
+      const before = await this.deps.localAdapter.stat(path);
+      await this.deps.localAdapter.atomicWriteBinary(
+        path, remoteData, this.deps.localWrite.mtimeFor(path, remote.lastModified || undefined),
+        writeCreationTimeMs(before?.ctime, remote.creationTime),
+      );
+      this.deps.localWrite.written(path);
     } catch (err) {
       this.deps.journal.recordError(summary, path, err);
       this.deps.queueRetry(path);
@@ -305,7 +358,8 @@ export class ConflictApplier {
       size: remote.size, mtime,
       remoteFileId: remote.fileId, isConflicted: false,
     }, remote.lastModified));
-    this.deps.mergeBase.record(path, new TextDecoder().decode(remoteData));
+    this.deps.mergeBase.recordBytes(path, remoteData);
+    if (client) await this.deps.creationTime?.align(client, remote);
     void this.deps.logger?.log(`conflict: resolved by prefer-remote (local overwritten) → ${path}`);
   }
 }

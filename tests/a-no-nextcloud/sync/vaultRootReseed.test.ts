@@ -173,7 +173,7 @@ async function buildHarness(o: HarnessOptions) {
 
   const features: NextcloudFeatures = {
     isNextcloud: true, version: '30', hasChecksums: true, hasFilesLocking: false,
-    hasBulkUpload: false, syncToken: null,
+    hasBulkUpload: false, hasAccountDav: true, syncToken: null,
   };
   const createClient = jest.fn(async () => ({ client, features }));
   const logger = { log: jest.fn() };

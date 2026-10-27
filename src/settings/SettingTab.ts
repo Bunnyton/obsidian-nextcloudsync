@@ -102,6 +102,17 @@ export class NextcloudSyncSettingTab extends PluginSettingTab implements Setting
   }
 
 
+  openCommunityPluginPicker(): void {
+    this.plugin.openCommunityPluginPicker(() => this.update());
+  }
+
+  async removeSyncedCommunityPlugin(id: string): Promise<void> {
+    this.plugin.settings.syncedCommunityPlugins =
+      (this.plugin.settings.syncedCommunityPlugins ?? []).filter((p) => p !== id);
+    await this.plugin.saveSettings();
+    this.update();
+  }
+
   renderNotice(setting: Setting, text: string, cls?: string): void {
     setting.settingEl.empty();
     setting.settingEl.addClass('setting-item-description');
@@ -119,7 +130,9 @@ export class NextcloudSyncSettingTab extends PluginSettingTab implements Setting
     setting.addComponent((el) => new SecretComponent(this.app, el)
       .setValue(this.plugin.settings.passwordSecretId || DEFAULT_PASSWORD_SECRET_ID)
       .onChange(async (secretId) => {
-        this.plugin.settings.passwordSecretId = secretId;
+        // SecretComponent reports null when the selection is cleared; store the "unset" value ('') so the
+        // existing `|| DEFAULT_PASSWORD_SECRET_ID` fallback at read time stays the only resolution path.
+        this.plugin.settings.passwordSecretId = secretId ?? '';
         await this.plugin.saveSettings();
         // Sign-in state gates the banner's visibility and "Sync now", so rebuild.
         this.update();

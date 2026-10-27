@@ -2,6 +2,9 @@ import { SyncEngine } from '../../../src/sync/SyncEngine';
 import { LocalAdapter } from '../../../src/data/LocalAdapter';
 import { DavSyncSettings, DEFAULT_SETTINGS, ConfigSyncCategories, SyncSessionSummary, RemoteFileInfo, FileState } from '../../../src/types';
 import { DataAdapter, Vault } from 'obsidian';
+import { StateDB } from '../../../src/data/StateDB';
+import { sha256 } from '../../../src/util/hash';
+import { TFile } from '../support/obsidian';
 
 function makeDataAdapter(overrides: Partial<DataAdapter> = {}): DataAdapter {
   return {
@@ -47,7 +50,7 @@ function settings(syncConfigFolder: boolean, configSync: Partial<ConfigSyncCateg
 function makeSummary(): SyncSessionSummary {
   return {
     startedAt: 0, completedAt: null, uploadedCount: 0, downloadedCount: 0,
-    deletedCount: 0, mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], errors: [],
+    deletedCount: 0, mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], pluginsNeedingRestart: [], errors: [],
   };
 }
 
@@ -205,5 +208,162 @@ describe('[SPEC:CSF-12] config JSON conflict resolves via Other File / latest-mt
     // [SPEC:ES-11]: the tie must invalidate the root-ETag short-circuit so the next sync re-scans instead of
     // rebuilding from stale State and silently uploading the local JSON over the remote.
     expect(h.setRemoteRootEtag).toHaveBeenCalledWith(null);
+  });
+});
+
+// Engine wiring for listed community plugins: only the four bundle files directly under a listed plugin folder
+// take part in a sync, in every direction. (docs/spec.md §7)
+describe('[SPEC:CPS-2] community plugin files in the engine', () => {
+  const dec = new TextDecoder();
+  const BASE_MTIME = 1_000;
+  const PDIR = `${CONFIG_DIR}/plugins/p`;
+  const BUNDLE = ['manifest.json', 'main.js', 'styles.css', 'data.json'];
+  const bodyOf = (file: string): string =>
+    (file === 'manifest.json' ? '{"id":"p","name":"P","version":"1.0.0"}' : `body of ${file}`);
+
+  function stateAdapter(): DataAdapter {
+    const store: Record<string, string> = {};
+    return makeDataAdapter({
+      read: jest.fn(async (p: string) => store[p] ?? ''),
+      write: jest.fn(async (p: string, d: string) => { store[p] = d; }),
+      exists: jest.fn(async (p: string) => p in store),
+      remove: jest.fn(async (p: string) => { delete store[p]; }),
+      rename: jest.fn(async (f: string, t: string) => { store[t] = store[f]; delete store[f]; }),
+    });
+  }
+
+  async function remoteEntry(path: string, body: string): Promise<RemoteFileInfo> {
+    return {
+      path, fileId: `fid-${path}`, checksum: await sha256(toBuf(body)), etag: null,
+      size: enc.encode(body).length, lastModified: BASE_MTIME,
+    };
+  }
+
+  async function track(stateDB: StateDB, path: string, body: string): Promise<void> {
+    const hash = await sha256(toBuf(body));
+    const size = enc.encode(body).length;
+    stateDB.setFile({
+      path, localHash: hash, remoteId: hash, idType: 'sha256', size, mtime: BASE_MTIME,
+      remoteFileId: `fid-${path}`, isConflicted: false, localMtime: BASE_MTIME, localSize: size, remoteMtime: BASE_MTIME,
+    });
+  }
+
+  async function build(vault: Record<string, string>, listing: RemoteFileInfo[], list: string[]) {
+    const stateDB = new StateDB(stateAdapter(), PLUGIN_DIR, 'dev1');
+    await stateDB.load();
+    // One tracked, unchanged note keeps the session off the first-sync route.
+    vault['unrelated.md'] = 'unrelated';
+    await track(stateDB, 'unrelated.md', 'unrelated');
+    listing.push(await remoteEntry('unrelated.md', 'unrelated'));
+    const sizeOf = (p: string): number => enc.encode(vault[p]).length;
+    const localAdapter = {
+      // Obsidian's vault index omits dot paths, so the config folder is reached only through stat.
+      listVaultFiles: jest.fn(() => Object.keys(vault).filter(p => !p.startsWith('.'))
+        .map(p => ({ path: p, size: sizeOf(p), mtime: BASE_MTIME }))),
+      list: jest.fn(async () => ({ files: [], folders: [] })),
+      stat: jest.fn(async (p: string) => (p in vault ? { size: sizeOf(p), mtime: BASE_MTIME } : null)),
+      exists: jest.fn(async (p: string) => p in vault),
+      read: jest.fn(async (p: string) => vault[p] ?? ''),
+      readBinary: jest.fn(async (p: string) => toBuf(vault[p] ?? '')),
+      atomicWrite: jest.fn(async (p: string, d: string) => { vault[p] = d; }),
+      atomicWriteBinary: jest.fn(async (p: string, d: ArrayBuffer) => { vault[p] = dec.decode(d); }),
+      writeBinary: jest.fn(async (p: string, d: ArrayBuffer) => { vault[p] = dec.decode(d); }),
+      remove: jest.fn(async (p: string) => { delete vault[p]; }),
+      ignore: jest.fn(),
+    };
+    const client = {
+      getRootEtag: jest.fn(async (): Promise<string | null> => null),
+      getFiles: jest.fn(async () => listing),
+      getDirectories: jest.fn(async () => []),
+      getSyncToken: jest.fn(async (): Promise<string | null> => null),
+      remoteExists: jest.fn(async (p: string) => listing.some(f => f.path === p)),
+      statFile: jest.fn(async () => null),
+      uploadFile: jest.fn(async () => undefined),
+      deleteFile: jest.fn(async () => undefined),
+      createDirectory: jest.fn(async () => undefined),
+      isRemoteDirEmpty: jest.fn(async () => true),
+      recalcChecksum: jest.fn(async () => null),
+      downloadFile: jest.fn(async (p: string) => toBuf(remoteBodies.get(p) ?? '')),
+    };
+    const remoteBodies = new Map<string, string>();
+    const app = {
+      vault: {
+        adapter: {
+          exists: jest.fn(async (p: string) => p in vault),
+          remove: jest.fn(async (p: string) => { delete vault[p]; }),
+          mkdir: jest.fn(async () => undefined),
+        },
+        getAbstractFileByPath: (p: string) => (p in vault ? new TFile(p) : null),
+        getAllFolders: () => [],
+      },
+      fileManager: { trashFile: jest.fn(async (f: TFile) => { delete vault[f.path]; }) },
+    };
+    const engine = new SyncEngine({
+      app, settings: { ...DEFAULT_SETTINGS, syncOnWifiOnly: false, syncConfigFolder: true, syncedCommunityPlugins: list },
+      localAdapter, stateDB, statusBar: { setStatus: jest.fn(), setSyncComplete: jest.fn(), setProgress: jest.fn() },
+      webdavFactory: { createClient: jest.fn(async () => ({ client, features: { isNextcloud: true } })) },
+      pluginDir: PLUGIN_DIR, configDir: CONFIG_DIR,
+    } as never);
+    const sync = async (): Promise<void> => { await engine.syncManual({ manual: true }); await stateDB.flush(); };
+    return { engine, stateDB, vault, client, remoteBodies, sync };
+  }
+
+  const pluginPaths = (vault: Record<string, string>): string[] =>
+    Object.keys(vault).filter(p => p.startsWith(`${CONFIG_DIR}/plugins/`)).sort();
+
+  beforeEach(() => {
+    (globalThis as { navigator?: unknown }).navigator ??= {};
+  });
+
+  it('writes only the three code files of a listed plugin when it exists on the server', async () => {
+    const listing: RemoteFileInfo[] = [];
+    const h = await build({}, listing, ['p']);
+    const remotePaths = [
+      ...BUNDLE.map(f => `${PDIR}/${f}`), `${PDIR}/sub/x.js`, `${PDIR}/README.md`,
+    ];
+    for (const path of remotePaths) {
+      const body = path.endsWith('/sub/x.js') ? 'sub' : path.endsWith('README.md') ? 'readme' : bodyOf(path.slice(PDIR.length + 1));
+      h.remoteBodies.set(path, body);
+      listing.push(await remoteEntry(path, body));
+    }
+
+    await h.sync();
+
+    // data.json is held back in the sync that delivers the code of an enabled plugin (docs/spec.md §7, CPS-13).
+    expect(pluginPaths(h.vault)).toEqual(BUNDLE.filter(f => f !== 'data.json').map(f => `${PDIR}/${f}`).sort());
+    expect(h.client.downloadFile).not.toHaveBeenCalledWith(`${PDIR}/data.json`);
+    expect(h.client.downloadFile).not.toHaveBeenCalledWith(`${PDIR}/sub/x.js`);
+    expect(h.client.downloadFile).not.toHaveBeenCalledWith(`${PDIR}/README.md`);
+  });
+
+  it('removes a tracked file of a listed plugin locally when it is deleted on the server', async () => {
+    const vault: Record<string, string> = {};
+    const listing: RemoteFileInfo[] = [];
+    const h = await build(vault, listing, ['p']);
+    for (const f of BUNDLE) {
+      vault[`${PDIR}/${f}`] = bodyOf(f);
+      await track(h.stateDB, `${PDIR}/${f}`, bodyOf(f));
+      if (f !== 'main.js') listing.push(await remoteEntry(`${PDIR}/${f}`, bodyOf(f)));
+    }
+
+    await h.sync();
+
+    expect(`${PDIR}/main.js` in vault).toBe(false);
+    expect(pluginPaths(vault)).toEqual(['manifest.json', 'styles.css', 'data.json'].map(f => `${PDIR}/${f}`).sort());
+  });
+
+  it('adds only the four bundle files of a listed plugin to the upload candidates', async () => {
+    const vault: Record<string, string> = {};
+    for (const f of BUNDLE) vault[`${PDIR}/${f}`] = bodyOf(f);
+    vault[`${PDIR}/sub/x.js`] = 'sub';
+    vault[`${PDIR}/README.md`] = 'readme';
+    vault[`${CONFIG_DIR}/plugins/q/main.js`] = 'q code';
+    vault[`${CONFIG_DIR}/plugins/q/manifest.json`] = '{"id":"q","version":"1.0.0"}';
+    const h = await build(vault, [], ['p']);
+
+    await h.sync();
+
+    const uploaded = h.client.uploadFile.mock.calls.map((c) => (c as unknown as [string])[0]).sort();
+    expect(uploaded).toEqual(BUNDLE.map(f => `${PDIR}/${f}`).sort());
   });
 });

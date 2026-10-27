@@ -16,11 +16,19 @@ import { FIXED } from '../../util/fixedSyncConfig';
 import { isAnomalousRemoteContent, isOverFileSizeLimit } from '../../util/limits';
 import { sha256 } from '../../util/hash';
 import { remoteIdOf } from '../remoteIdentity';
+import { uploadCreationTimeMs, writeCreationTimeMs } from '../../util/creationTime';
 import { bytesEqual } from '../identity/contentIdentity';
+import type { LocalWritePort } from '../plugins/PluginSyncCoordinator';
+import type { CreationTimePort } from '../ctime/CreationTimeAligner';
 
 export interface TransferDeps {
+  // Aligns the creation time of files whose body this sync left unchanged (docs/spec.md §9.7). Optional so tests
+  // can omit it; the engine always passes one.
+  creationTime?: CreationTimePort;
   localAdapter: Pick<LocalAdapter, 'stat' | 'readBinary' | 'atomicWriteBinary'>;
   stateDB: Pick<StateDB, 'getFile' | 'setFile'>;
+  // Chooses the mtime of a fetched body and is told after each write (a plugin's data.json gets the write time).
+  localWrite: LocalWritePort;
   journal: SyncJournal;
   mergeBase: MergeBaseRecorder;
   // Read at call time: the cap is a live setting.
@@ -71,7 +79,10 @@ export class TransferService {
     try {
       // If-Match with the known remote etag makes a remote changed since our baseline return 412
       // (PreconditionFailedError, a conflict). New local files carry a null etag, so no precondition.
-      outcome = await uploadStrategy.upload(client, path, data, stat.mtime, { ifMatchEtag: remote.etag });
+      outcome = await uploadStrategy.upload(client, path, data, stat.mtime, {
+        ifMatchEtag: remote.etag,
+        ctime: uploadCreationTimeMs(stat.ctime, remote.creationTime),
+      });
     } finally {
       await this.releaseLock(client, path, token);
     }
@@ -106,7 +117,7 @@ export class TransferService {
       remoteFileId: remote.fileId, isConflicted: false,
     }, remote.lastModified));
     // The remote now equals the uploaded body, so it is the new merge base.
-    this.deps.mergeBase.record(path, new TextDecoder().decode(data));
+    this.deps.mergeBase.recordBytes(path, data);
   }
 
   async downloadFile(
@@ -144,11 +155,14 @@ export class TransferService {
         size: remote.size, mtime: remote.lastModified || localStat.mtime,
         remoteFileId: remote.fileId, isConflicted: false,
       }, remote.lastModified));
-      this.deps.mergeBase.record(remote.path, new TextDecoder().decode(data));
+      this.deps.mergeBase.recordBytes(remote.path, data);
       void this.deps.logger?.log(`download: body identical to the local file → state converged, no write → ${remote.path}`);
+      await this.deps.creationTime?.align(client, remote, localStat);
       return;
     }
-    await this.deps.localAdapter.atomicWriteBinary(remote.path, data, remote.lastModified || undefined);
+    const writeMtime = this.deps.localWrite.mtimeFor(remote.path, remote.lastModified || undefined);
+    await this.deps.localAdapter.atomicWriteBinary(remote.path, data, writeMtime, writeCreationTimeMs(localStat?.ctime, remote.creationTime));
+    this.deps.localWrite.written(remote.path);
     summary.downloadedCount++;
 
     const localHash = await sha256(data);
@@ -163,7 +177,8 @@ export class TransferService {
       remoteFileId: remote.fileId, isConflicted: false,
     }, remote.lastModified));
     // Local now equals the remote body, so it is the new merge base.
-    this.deps.mergeBase.record(remote.path, new TextDecoder().decode(data));
+    this.deps.mergeBase.recordBytes(remote.path, data);
+    await this.deps.creationTime?.align(client, remote);
   }
 
   // Decided BEFORE any GET from the PROPFIND-advertised size; `maxFileSizeMB` 0 means unlimited. The single

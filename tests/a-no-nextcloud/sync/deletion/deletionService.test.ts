@@ -21,7 +21,7 @@ import { TFile, TFolder, Notice } from '../../support/obsidian';
 function summary(): SyncSessionSummary {
   return {
     startedAt: 0, completedAt: null, uploadedCount: 0, downloadedCount: 0, deletedCount: 0,
-    mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], errors: [],
+    mergedCount: 0, conflictedCount: 0, errorCount: 0, retriedFiles: [], pluginsNeedingRestart: [], errors: [],
   };
 }
 
@@ -128,6 +128,7 @@ function build(o: Opts = {}, over: Partial<DeletionDeps> = {}) {
     }) as unknown as SyncJournal,
     mergeBase: {
       record: () => { /* noop */ },
+      recordBytes: () => { /* noop */ },
       drop: (p: string) => { calls.droppedBase.push(p); },
     } as unknown as MergeBaseRecorder,
     transfer: {

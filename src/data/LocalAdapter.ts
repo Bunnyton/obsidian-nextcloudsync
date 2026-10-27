@@ -1,7 +1,13 @@
 import type { DataWriteOptions } from 'obsidian';
+import type { CreationTimeSupport } from './creationTimeProbe';
+import { isValidCreationMs } from '../util/creationTime';
 import { DataAdapter, FileView, Notice, TFile, Vault, Workspace, normalizePath } from 'obsidian';
 
 export interface LocalFileEntry { path: string; size: number; mtime: number; }
+
+export interface LocalStat { size: number; mtime: number; ctime?: number }
+
+export type CreationTimeSupportSource = () => Promise<CreationTimeSupport>;
 
 // Atomic-write temp suffix, kept short: the temp file lives in the target's own directory and each path component is
 // capped at NAME_MAX bytes (255 on ext4/F2FS), so the temp name must not inherit the target's length (see tmpPathFor).
@@ -10,11 +16,18 @@ const TMP_SUFFIX = '.ncs.tmp';
 const LEGACY_TMP_SUFFIX = '.nextcloudsync.tmp';
 const NAME_MAX_BYTES = 255;
 const IGNORE_TIMEOUT_MS = 5000;
+// A stored creation time further than this from the requested one is treated as not applied (docs/spec.md §9.7).
+const CTIME_TOLERANCE_MS = 1000;
 
 // Trailing write-options argument carrying the file's modification time (docs/spec.md §9.6). Without a positive mtime
-// the argument is omitted, not passed as undefined, so the API applies its default (the write time).
-function writeOptionsArgs(mtime: number | undefined): [] | [DataWriteOptions] {
-  return mtime !== undefined && mtime > 0 ? [{ mtime }] : [];
+// the argument is omitted, not passed as undefined, so the API applies its default (the write time). `ctime` carries the
+// creation time (docs/spec.md §9.7); the caller passes it only on a platform where it is settable.
+function writeOptionsArgs(mtime: number | undefined, ctime?: number): [] | [DataWriteOptions] {
+  const hasMtime = mtime !== undefined && mtime > 0;
+  if (hasMtime && ctime !== undefined) return [{ mtime, ctime }];
+  if (hasMtime) return [{ mtime }];
+  if (ctime !== undefined) return [{ ctime }];
+  return [];
 }
 
 // NAME_MAX is measured in bytes, not UTF-16 code units.
@@ -63,12 +76,60 @@ export function isSyncTmpPath(path: string): boolean {
 // does not track (state/log files), and reads raw bytes. Remote->local paths go through normalizePath() at the boundary.
 export class LocalAdapter {
   private ignoreList: Map<string, number> = new Map();
+  private creationTimeSupportPromise: Promise<CreationTimeSupport> | undefined = undefined;
 
   constructor(
     private readonly adapter: DataAdapter,
     private readonly vault?: Vault,
     private readonly workspace?: Workspace,
+    private readonly creationTimeSupportSource?: CreationTimeSupportSource,
   ) {}
+
+  /** Memoized result of the platform probe (docs/spec.md §9.7). Never rejects: a failing source yields 'untrusted'. */
+  creationTimeSupport(): Promise<CreationTimeSupport> {
+    if (!this.creationTimeSupportPromise) {
+      const source = this.creationTimeSupportSource;
+      const pending: Promise<CreationTimeSupport> = source ? Promise.resolve().then(source) : Promise.resolve('untrusted');
+      this.creationTimeSupportPromise = pending.catch((): CreationTimeSupport => 'untrusted');
+    }
+    return this.creationTimeSupportPromise;
+  }
+
+  // The ctime to put in write options: only on a settable platform and only when valid.
+  private async effectiveCtime(ctime: number | undefined): Promise<number | undefined> {
+    if (!isValidCreationMs(ctime)) return undefined;
+    return (await this.creationTimeSupport()) === 'settable' ? ctime : undefined;
+  }
+
+  // Windows file-time tunneling can keep the replaced file's creation time; re-apply it when the stored value is off.
+  // Failures are logged and swallowed: the write itself succeeded and the next sync compares again.
+  private async correctTunneling(targetPath: string, ctime: number | undefined): Promise<void> {
+    if (ctime === undefined) return;
+    try {
+      const st = await this.adapter.stat(targetPath);
+      if (st && Math.abs((st.ctime ?? 0) - ctime) >= CTIME_TOLERANCE_MS) {
+        await this.setCreationTime(targetPath, ctime);
+      }
+    } catch (err) {
+      console.warn(`creation time correction failed for ${targetPath}`, err);
+    }
+  }
+
+  /**
+   * Sets only the creation time, leaving content and mtime unchanged (DataAdapter.append with '' and
+   * { ctime, mtime: current mtime }). Callers check creationTimeSupport() === 'settable' first.
+   * @returns 'applied' when the re-stat ctime is within 1000 ms of ctimeMs, 'ineffective' otherwise,
+   *          'absent' when the file does not exist. Rejects on an adapter error (caller treats it as transient).
+   */
+  async setCreationTime(path: string, ctimeMs: number): Promise<'applied' | 'ineffective' | 'absent'> {
+    const normalized = normalizePath(path);
+    const before = await this.adapter.stat(normalized);
+    if (!before) return 'absent';
+    this.ignore(normalized);
+    await this.adapter.append(normalized, '', { ctime: ctimeMs, mtime: before.mtime });
+    const after = await this.adapter.stat(normalized);
+    return after?.ctime !== undefined && Math.abs(after.ctime - ctimeMs) < CTIME_TOLERANCE_MS ? 'applied' : 'ineffective';
+  }
 
   // Resolves `path` to the TFile held by an open leaf, or null. A DEFERRED leaf (background tab, Obsidian >= 1.7.2) carries a
   // DeferredView that is not a FileView, so its path is read from the serialized view state and looked up via the Vault;
@@ -128,12 +189,14 @@ export class LocalAdapter {
 
   // An open leaf is updated in place via Vault.modify (no delete event, so Obsidian never detaches it, issue #15);
   // otherwise tmp-write -> remove existing -> rename.
-  async atomicWrite(targetPath: string, content: string, mtime?: number): Promise<void> {
+  async atomicWrite(targetPath: string, content: string, mtime?: number, ctime?: number): Promise<void> {
     targetPath = normalizePath(targetPath);
+    const effCtime = await this.effectiveCtime(ctime);
     const openFile = this.findOpenTFile(targetPath);
     if (openFile) {
       this.ignore(targetPath);
-      await this.vault!.modify(openFile, content, ...writeOptionsArgs(mtime));
+      await this.vault!.modify(openFile, content, ...writeOptionsArgs(mtime, effCtime));
+      await this.correctTunneling(targetPath, effCtime);
       return;
     }
     const tmpPath = tmpPathFor(targetPath);
@@ -142,7 +205,7 @@ export class LocalAdapter {
     let targetRemoved = false;
     try {
       await this.ensureParentDir(targetPath);
-      await this.adapter.write(tmpPath, content, ...writeOptionsArgs(mtime));
+      await this.adapter.write(tmpPath, content, ...writeOptionsArgs(mtime, effCtime));
       if (await this.adapter.exists(targetPath)) {
         await this.adapter.remove(targetPath);
         targetRemoved = true;
@@ -156,15 +219,18 @@ export class LocalAdapter {
       }
       throw translateNameTooLong(err, targetPath);
     }
+    await this.correctTunneling(targetPath, effCtime);
   }
 
   // Same open-file in-place path as atomicWrite (Vault.modifyBinary); otherwise tmp-write -> remove -> rename with read-back verification.
-  async atomicWriteBinary(targetPath: string, data: ArrayBuffer, mtime?: number): Promise<void> {
+  async atomicWriteBinary(targetPath: string, data: ArrayBuffer, mtime?: number, ctime?: number): Promise<void> {
     targetPath = normalizePath(targetPath);
+    const effCtime = await this.effectiveCtime(ctime);
     const openFile = this.findOpenTFile(targetPath);
     if (openFile) {
       this.ignore(targetPath);
-      await this.vault!.modifyBinary(openFile, data, ...writeOptionsArgs(mtime));
+      await this.vault!.modifyBinary(openFile, data, ...writeOptionsArgs(mtime, effCtime));
+      await this.correctTunneling(targetPath, effCtime);
       return;
     }
     const tmpPath = tmpPathFor(targetPath);
@@ -173,7 +239,7 @@ export class LocalAdapter {
     let targetRemoved = false;
     try {
       await this.ensureParentDir(targetPath);
-      await this.adapter.writeBinary(tmpPath, data, ...writeOptionsArgs(mtime));
+      await this.adapter.writeBinary(tmpPath, data, ...writeOptionsArgs(mtime, effCtime));
       if (await this.adapter.exists(targetPath)) {
         await this.adapter.remove(targetPath);
         targetRemoved = true;
@@ -193,6 +259,7 @@ export class LocalAdapter {
       }
       throw translateNameTooLong(err, targetPath);
     }
+    await this.correctTunneling(targetPath, effCtime);
   }
 
   async read(path: string): Promise<string> {
@@ -207,8 +274,14 @@ export class LocalAdapter {
     return this.adapter.exists(normalizePath(path));
   }
 
-  async stat(path: string): Promise<{ size: number; mtime: number } | null> {
-    return this.adapter.stat(normalizePath(path));
+  /** adapter.stat plus `ctime` only when trusted (support !== 'untrusted') and valid. null when absent. */
+  async stat(path: string): Promise<LocalStat | null> {
+    const st = await this.adapter.stat(normalizePath(path));
+    if (!st) return null;
+    if ((await this.creationTimeSupport()) !== 'untrusted' && isValidCreationMs(st.ctime)) {
+      return { size: st.size, mtime: st.mtime, ctime: st.ctime };
+    }
+    return { size: st.size, mtime: st.mtime };
   }
 
   async list(path: string): Promise<{ files: string[]; folders: string[] }> {

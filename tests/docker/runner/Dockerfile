@@ -6,10 +6,9 @@
 # The build context is restricted by Dockerfile.dockerignore to the package manifests and this
 # directory, so local secrets such as .env never enter the image. The repository itself is mounted
 # read-only at /src at run time and copied into /work by suite-entry.sh.
-FROM node:24-bookworm
+FROM node:26-bookworm
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    COREPACK_ENABLE_DOWNLOAD_PROMPT=0
+ENV DEBIAN_FRONTEND=noninteractive
 
 # Tooling for the suite plus the shared libraries Electron (Obsidian, b2) needs under Xvfb.
 RUN apt-get update \
@@ -17,9 +16,6 @@ RUN apt-get update \
         git curl openssl xvfb xauth libnss3-tools openjdk-17-jdk-headless unzip util-linux \
         libgtk-3-0 libnss3 libasound2 libgbm1 libxss1 libxshmfence1 libdrm2 libxkbcommon0 \
     && rm -rf /var/lib/apt/lists/*
-
-# pnpm version must match the "packageManager" field in package.json.
-RUN corepack enable && corepack prepare pnpm@12.3.4 --activate
 
 ENV ANDROID_HOME=/opt/android-sdk \
     ANDROID_SDK_ROOT=/opt/android-sdk \
@@ -39,6 +35,8 @@ RUN mkdir -p "${ANDROID_HOME}/cmdline-tools" \
 # Dependencies are installed into the image; /work/node_modules is reused by every run.
 WORKDIR /work
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+# pnpm's version comes from "packageManager" in package.json (single source); Node 25+ images ship no Corepack.
+RUN npm install -g "pnpm@$(node -p "require('./package.json').packageManager.split('@')[1].split('+')[0]")"
 RUN --mount=type=cache,target=/root/.local/share/pnpm/store \
     pnpm install --frozen-lockfile
 

@@ -9,6 +9,9 @@ import { NextcloudClient } from '../../../src/network/NextcloudClient';
 import { StandardWebDAVClient } from '../../../src/network/StandardWebDAVClient';
 import { DEFAULT_SETTINGS, DavSyncSettings, FileState, RemoteFileInfo, RemoteDirInfo } from '../../../src/types';
 import { FORCE_FULL_SCAN_EVERY } from '../../../src/util/limits';
+import { sha256 } from '../../../src/util/hash';
+import { computeSyncScopeFingerprint } from '../../../src/sync/plugins/scopeFingerprint';
+import type { SyncScopeInput } from '../../../src/sync/plugins/scopeFingerprint';
 
 const mockRequestUrl = requestUrl as unknown as jest.Mock;
 
@@ -264,5 +267,184 @@ describe('[SPEC:ES-1..ES-10] root-ETag short-circuit', () => {
       expect(etag).toBeNull();
       expect(mockRequestUrl).not.toHaveBeenCalled();
     });
+  });
+});
+
+describe('[SPEC:CPS-16] computeSyncScopeFingerprint', () => {
+  const scope = (over: Partial<SyncScopeInput> = {}): SyncScopeInput => ({
+    syncConfigFolder: true,
+    configSync: { bookmarks: true, others: false },
+    excludedFolders: ['b', 'a'],
+    syncedCommunityPlugins: ['y', 'x'],
+    ...over,
+  });
+  const fp = (over: Partial<SyncScopeInput> = {}): string => computeSyncScopeFingerprint(scope(over));
+
+  it('ignores the order of excludedFolders, syncedCommunityPlugins and the configSync keys', () => {
+    const reordered = scope({
+      excludedFolders: ['a', 'b'],
+      syncedCommunityPlugins: ['x', 'y'],
+      configSync: { others: false, bookmarks: true },
+    });
+    expect(computeSyncScopeFingerprint(reordered)).toBe(fp());
+  });
+
+  it('with syncConfigFolder off, ignores configSync and syncedCommunityPlugins but not excludedFolders', () => {
+    const off = fp({ syncConfigFolder: false });
+    expect(fp({ syncConfigFolder: false, configSync: { bookmarks: false, others: true } })).toBe(off);
+    expect(fp({ syncConfigFolder: false, syncedCommunityPlugins: ['z'] })).toBe(off);
+    expect(fp({ syncConfigFolder: false, excludedFolders: ['c'] })).not.toBe(off);
+  });
+
+  it('with syncConfigFolder on, reacts to the plugin list and configSync.others', () => {
+    expect(fp({ syncedCommunityPlugins: ['x', 'y', 'z'] })).not.toBe(fp());
+    expect(fp({ syncedCommunityPlugins: ['x'] })).not.toBe(fp());
+    expect(fp({ configSync: { bookmarks: true, others: true } })).not.toBe(fp());
+  });
+
+  it('equals the documented JSON expression', () => {
+    expect(fp()).toBe(JSON.stringify([
+      'scope-v2',
+      true,
+      [['bookmarks', true], ['others', false]],
+      ['a', 'b'],
+      ['x', 'y'],
+    ]));
+    expect(fp({ syncConfigFolder: false })).toBe(JSON.stringify(['scope-v2', false, [], ['a', 'b'], []]));
+  });
+});
+
+describe('[SPEC:CPS-16] sync-scope fingerprint and the root-ETag short-circuit', () => {
+  const enc = new TextEncoder();
+  const toBuf = (text: string): ArrayBuffer => enc.encode(text).buffer as ArrayBuffer;
+  const MTIME = 1_000;
+  const ROOT = 'ROOT-1';
+
+  interface Setup {
+    settings?: Partial<DavSyncSettings>;
+    awaiting?: string[];
+    extraLocal?: Record<string, string>;
+    storedEtag?: string | null;
+  }
+
+  // A converged one-note vault on a Nextcloud double whose root ETag never changes, so only the sync scope
+  // decides whether a sync short-circuits.
+  async function build(init: Setup = {}) {
+    const files: Record<string, string> = { 'a.md': 'alpha', ...(init.extraLocal ?? {}) };
+    const db = await makeStateDB();
+    const hash = await sha256(toBuf('alpha'));
+    db.setFile({
+      path: 'a.md', localHash: hash, remoteId: hash, idType: 'sha256', size: 5, mtime: MTIME,
+      remoteFileId: 'fid-a', isConflicted: false, localMtime: MTIME, localSize: 5, remoteMtime: MTIME,
+    });
+    if (init.storedEtag !== undefined) db.setRemoteRootEtag(init.storedEtag);
+    const sizeOf = (p: string): number => enc.encode(files[p]).length;
+    const localAdapter = {
+      listVaultFiles: jest.fn(() => Object.keys(files).map((p) => ({ path: p, size: sizeOf(p), mtime: MTIME }))),
+      list: jest.fn(async () => ({ files: [], folders: [] })),
+      stat: jest.fn(async (p: string) => (p in files ? { size: sizeOf(p), mtime: MTIME } : null)),
+      exists: jest.fn(async (p: string) => p in files),
+      read: jest.fn(async (p: string) => files[p] ?? ''),
+      readBinary: jest.fn(async (p: string) => toBuf(files[p] ?? '')),
+      atomicWrite: jest.fn(async () => undefined), atomicWriteBinary: jest.fn(async () => undefined),
+      writeBinary: jest.fn(async () => undefined), remove: jest.fn(async () => undefined),
+    };
+    const listing: RemoteFileInfo[] = [
+      { path: 'a.md', fileId: 'fid-a', checksum: hash, etag: null, size: 5, lastModified: MTIME },
+    ];
+    const client = {
+      getRootEtag: jest.fn(async () => ROOT),
+      getFiles: jest.fn(async () => listing),
+      getSyncToken: jest.fn(async (): Promise<string | null> => null),
+      getDirectories: jest.fn(async () => []),
+      remoteExists: jest.fn(async () => true),
+      statFile: jest.fn(async () => null),
+      downloadFile: jest.fn(async () => toBuf('')),
+      uploadFile: jest.fn(async () => undefined),
+      createDirectory: jest.fn(async () => undefined),
+      isRemoteDirEmpty: jest.fn(async () => true),
+      recalcChecksum: jest.fn(async (): Promise<string | null> => null),
+    };
+    const settings: DavSyncSettings = { ...DEFAULT_SETTINGS, syncOnWifiOnly: false, ...(init.settings ?? {}) };
+    const app = {
+      vault: {
+        adapter: { exists: jest.fn(async (p: string) => p in files), mkdir: jest.fn(async () => undefined) },
+        getAbstractFileByPath: () => null, getAllFolders: () => [],
+      },
+      fileManager: { trashFile: jest.fn(async () => undefined) },
+    };
+    const statusBar = { setStatus: jest.fn(), setSyncComplete: jest.fn(), setProgress: jest.fn() };
+    const engine = new SyncEngine({
+      app, settings, localAdapter, stateDB: db, statusBar,
+      webdavFactory: { createClient: jest.fn(async () => ({ client, features: { isNextcloud: true } })) },
+      pluginDir: PLUGIN_DIR, configDir: '.obsidian', pluginsAwaitingRestart: new Set(init.awaiting ?? []),
+    } as never);
+    const sync = async (): Promise<void> => { await engine.syncManual({ manual: true }); await db.flush(); };
+    return { db, client, settings, sync };
+  }
+
+  it('regression guard: an unchanged scope short-circuits the next sync', async () => {
+    const env = await build();
+    await env.sync();
+    await env.sync();
+    expect(env.client.getFiles).toHaveBeenCalledTimes(1);
+  });
+
+  const scopeChanges: Array<[string, Partial<DavSyncSettings>, (s: DavSyncSettings) => void]> = [
+    ['adding a plugin to syncedCommunityPlugins', { syncConfigFolder: true, syncedCommunityPlugins: ['p'] },
+      (s) => { s.syncedCommunityPlugins = ['p', 'q']; }],
+    ['removing a plugin from syncedCommunityPlugins', { syncConfigFolder: true, syncedCommunityPlugins: ['p', 'q'] },
+      (s) => { s.syncedCommunityPlugins = ['p']; }],
+    ['turning configSync.others on', { syncConfigFolder: true, configSync: { bookmarks: true, others: false } },
+      (s) => { s.configSync = { ...s.configSync, others: true }; }],
+    ['changing excludedFolders', {},
+      (s) => { s.excludedFolders = ['skip']; }],
+  ];
+
+  it.each(scopeChanges)('%s forces a real scan on the next sync', async (_name, initial, change) => {
+    const env = await build({ settings: initial });
+    await env.sync();
+    await env.sync();
+    expect(env.client.getFiles).toHaveBeenCalledTimes(1);
+
+    change(env.settings);
+    await env.sync();
+
+    expect(env.client.getFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it('a sync where a listed plugin was ignored by the catalog leaves no root ETag', async () => {
+    const manifest = JSON.stringify({ version: '1.0.0', minAppVersion: '99.0.0' });
+    const env = await build({
+      settings: { syncConfigFolder: true, syncedCommunityPlugins: ['p'] },
+      extraLocal: { '.obsidian/plugins/p/manifest.json': manifest },
+    });
+    await env.sync();
+    expect(env.db.getRemoteRootEtag()).toBeNull();
+    await env.sync();
+    expect(env.client.getFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it('a sync with a listed plugin awaiting restart leaves no root ETag', async () => {
+    const env = await build({
+      settings: { syncConfigFolder: true, syncedCommunityPlugins: ['p'] },
+      awaiting: ['p'],
+    });
+    await env.sync();
+    expect(env.db.getRemoteRootEtag()).toBeNull();
+    await env.sync();
+    expect(env.client.getFiles).toHaveBeenCalledTimes(2);
+  });
+
+  it('a state without a fingerprint real-scans once, then stores the current fingerprint', async () => {
+    const env = await build({ storedEtag: ROOT, settings: { syncConfigFolder: true, syncedCommunityPlugins: ['p'] } });
+    expect(env.db.getSyncScopeFingerprint()).toBeNull();
+
+    await env.sync();
+
+    expect(env.client.getFiles).toHaveBeenCalledTimes(1);
+    expect(env.db.getSyncScopeFingerprint()).toBe(computeSyncScopeFingerprint(env.settings));
+    await env.sync();
+    expect(env.client.getFiles).toHaveBeenCalledTimes(1);
   });
 });

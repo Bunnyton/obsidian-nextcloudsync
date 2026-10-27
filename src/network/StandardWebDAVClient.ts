@@ -74,7 +74,7 @@ export class StandardWebDAVClient implements IWebDAVClient {
       throw: false,
     });
     if (res.status !== 207 && res.status !== 200) throw new NetworkError(res.status, res.text, 'PROPFIND');
-    return { isNextcloud: false, version: '', hasChecksums: false, hasFilesLocking: false, hasBulkUpload: false, syncToken: null };
+    return { isNextcloud: false, version: '', hasChecksums: false, hasFilesLocking: false, hasBulkUpload: false, hasAccountDav: false, syncToken: null };
   }
 
   async getFiles(path: string): Promise<RemoteFileInfo[]> {
@@ -236,7 +236,7 @@ export class StandardWebDAVClient implements IWebDAVClient {
 
   async uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; ctime?: number },
   ): Promise<void> {
     const headers: Record<string, string> = { Authorization: this.authHeader, ...NO_CACHE_HEADERS };
     if (mtime) headers['X-OC-MTime'] = String(Math.floor(mtime / 1000));
@@ -329,9 +329,14 @@ export class StandardWebDAVClient implements IWebDAVClient {
 
   async uploadChunked(
     _remotePath: string, _data: ArrayBuffer, _chunkSizeBytes: number,
-    _opts?: { precomputedSha256?: string; ifMatchEtag?: string | null },
+    _opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number },
   ): Promise<void> {
     throw new FeatureUnsupportedError('chunked-upload');
+  }
+
+  /** Plain WebDAV has no creation-time property; never sends a request (docs/spec.md §9.7). */
+  async setCreationTime(_remotePath: string, _seconds: number): Promise<'applied' | 'rejected'> {
+    return 'rejected';
   }
 
   async lockFile(_remotePath: string): Promise<string> {

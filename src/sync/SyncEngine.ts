@@ -1,4 +1,6 @@
-import { App, Notice, Platform } from 'obsidian';
+import { App, Notice, Platform, apiVersion } from 'obsidian';
+import { CreationTimeAligner } from './ctime/CreationTimeAligner';
+import { uploadCreationTimeMs } from '../util/creationTime';
 import {
   DavSyncSettings,
   FileState,
@@ -48,6 +50,12 @@ import { WebDAVFactory } from '../network/WebDAVFactory';
 import { IWebDAVClient } from '../network/IWebDAVClient';
 import { RenameTracker } from './RenameTracker';
 import { ConfigSyncResolver } from './ConfigSyncResolver';
+import { PluginSyncCoordinator } from './plugins/PluginSyncCoordinator';
+import { partitionPluginManifestsLast, pluginDirPath } from './plugins/pluginPaths';
+import { fileSameContent } from './plugins/bundleDirection';
+import { collectCommunityPluginCandidates, type PluginCandidateList } from './plugins/candidates';
+import { computeSyncScopeFingerprint } from './plugins/scopeFingerprint';
+import { dropSubtreeTracking } from './deletion/subtreeTracking';
 import { sha256 } from '../util/hash';
 import { FIXED, chunkThresholdMB } from '../util/fixedSyncConfig';
 import { FileLogger } from '../util/FileLogger';
@@ -90,6 +98,9 @@ interface SyncEngineOptions {
   logger?: FileLogger;
   // Lets the host persist the server version without coupling the engine to settings persistence.
   onFeatures?: (features: NextcloudFeatures) => void;
+  // Plugin ids whose code was written and that still need an Obsidian restart. Shared with the host so it
+  // outlives engine re-creation; a fresh set when omitted.
+  pluginsAwaitingRestart?: Set<string>;
 }
 
 export class SyncEngine {
@@ -108,6 +119,8 @@ export class SyncEngine {
   private readonly journal: SyncJournal;
 
   private readonly mergeBase: MergeBaseRecorder;
+  // One aligner shared by transfer, resolution and conflicts (docs/spec.md §9.7).
+  private readonly creationTime: CreationTimeAligner;
   private readonly transfer: TransferService;
 
   private readonly versions: VersionService;
@@ -132,17 +145,40 @@ export class SyncEngine {
   // and the remote-deletion scope guard).
   private readonly configSync: ConfigSyncResolver;
 
+  private readonly pluginsAwaitingRestart: Set<string>;
+  // This plugin's own folder name, derived from `pluginDir` so there is a single source for it.
+  private readonly ownPluginId: string;
+  private readonly plugins: PluginSyncCoordinator;
+
   private readonly localScanner: LocalScanner;
 
   // Accessors, not values: capabilities arrive later (ensureClient) and settings can change.
   private readonly remoteListing: RemoteListingSource;
 
   constructor(private readonly opts: SyncEngineOptions) {
+    this.pluginsAwaitingRestart = opts.pluginsAwaitingRestart ?? new Set();
+    // Tolerates a bare engine built without a plugin folder (some suites construct one with only the fields they use).
+    const pluginDir: string = opts.pluginDir ?? '';
+    this.ownPluginId = pluginDir.slice(pluginDir.lastIndexOf('/') + 1);
+    this.plugins = new PluginSyncCoordinator({
+      configDir: opts.configDir,
+      ownId: this.ownPluginId,
+      settings: opts.settings,
+      localAdapter: opts.localAdapter,
+      stateDB: opts.stateDB,
+      awaitingRestart: this.pluginsAwaitingRestart,
+      obsidianVersion: apiVersion,
+      isMobile: () => Platform.isMobile,
+      now: () => Date.now(),
+      notify: (m, t) => { new Notice(m, t); },
+      logger: opts.logger,
+    });
     this.configSync = new ConfigSyncResolver({
       configDir: opts.configDir,
       settings: opts.settings,
       pluginDir: opts.pluginDir,
       localAdapter: opts.localAdapter,
+      pluginGate: this.plugins,
     });
     this.localScanner = new LocalScanner({
       localAdapter: opts.localAdapter,
@@ -154,10 +190,19 @@ export class SyncEngine {
     this.mergeBase = new MergeBaseRecorder({
       baseStore: opts.baseStore,
       autoMergeFileTypes: () => this.opts.settings.autoMergeFileTypes,
+      isPluginPath: (p) => this.plugins.isPluginPath(p),
     });
-    this.transfer = new TransferService({
+    this.creationTime = new CreationTimeAligner({
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
+      isBeingEdited: (p) => this.opts.isBeingEdited?.(p) ?? false,
+      logger: opts.logger,
+    });
+    this.transfer = new TransferService({
+      creationTime: this.creationTime,
+      localAdapter: opts.localAdapter,
+      stateDB: opts.stateDB,
+      localWrite: this.plugins,
       journal: this.journal,
       mergeBase: this.mergeBase,
       maxFileSizeMB: () => this.opts.settings.maxFileSizeMB,
@@ -180,10 +225,12 @@ export class SyncEngine {
       logger: opts.logger,
     });
     this.resolution = new ResolutionService({
+      creationTime: this.creationTime,
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
       historyStore: opts.historyStore,
       cleanSideStore: opts.cleanSideStore,
+      localWrite: this.plugins,
       journal: this.journal,
       mergeBase: this.mergeBase,
       transfer: this.transfer,
@@ -192,6 +239,7 @@ export class SyncEngine {
       logger: opts.logger,
     });
     this.conflicts = new ConflictApplier({
+      creationTime: this.creationTime,
       app: opts.app,
       localAdapter: opts.localAdapter,
       stateDB: opts.stateDB,
@@ -200,6 +248,8 @@ export class SyncEngine {
       mergeBase: this.mergeBase,
       transfer: this.transfer,
       resolution: this.resolution,
+      localWrite: this.plugins,
+      pluginConflictRule: (p) => this.plugins.conflictRuleFor(p),
       resolverConfig: () => ({
         autoMergeFileTypes: this.opts.settings.autoMergeFileTypes,
         autoMergeFileStrategy: this.opts.settings.autoMergeFileStrategy,
@@ -237,6 +287,7 @@ export class SyncEngine {
       deletion: this.deletion,
       resolution: this.resolution,
       isSystemExcluded: (p) => this.isSystemExcluded(p),
+      isPluginPath: (p) => this.plugins.isPluginPath(p),
       connect: () => this.connection(),
       renameTracker: () => this.getOrCreateRenameTracker(),
       isBlockedByWifiOnly: () => this.isBlockedByWifiOnly(),
@@ -259,6 +310,7 @@ export class SyncEngine {
       statusBar: opts.statusBar,
       journal: this.journal,
       mergeBase: this.mergeBase,
+      plugins: this.plugins,
       transfer: this.transfer,
       deletion: this.deletion,
       localScanner: this.localScanner,
@@ -286,14 +338,35 @@ export class SyncEngine {
     return this.renameTracker;
   }
 
+  /** Lists community plugins on this device and (when reachable) the server for the picker. */
+  async listCommunityPluginCandidates(): Promise<PluginCandidateList> {
+    let client: IWebDAVClient | null;
+    try {
+      await this.ensureClient();
+      client = this.client;
+    } catch (err) {
+      void this.opts.logger?.log(`plugins: server unavailable for candidate listing — ${(err as Error).message}`);
+      client = null;
+    }
+    return collectCommunityPluginCandidates({
+      localAdapter: this.opts.localAdapter,
+      client,
+      configDir: this.opts.configDir,
+      ownId: this.ownPluginId,
+      isMobile: Platform.isMobile,
+      logger: this.opts.logger,
+    });
+  }
+
   private async ensureClient(): Promise<{ client: IWebDAVClient; features: NextcloudFeatures }> {
     if (!this.client || !this.features) {
       const { client, features } = await this.opts.webdavFactory.createClient();
       this.client = client;
       this.features = features;
-      // Chunked upload is gated only by server capability; the threshold is platform-derived (docs/spec.md §15.1.2).
+      // Chunked upload needs the account-only uploads namespace, which a public link share lacks (docs/spec.md §3);
+      // the threshold is platform-derived (docs/spec.md §15.1.2).
       const uploadConfig = { maxFileSizeMB: this.opts.settings.maxFileSizeMB, uploadChunkThresholdMB: chunkThresholdMB(Platform.isMobile) };
-      this.uploadStrategy = (FIXED.chunkedUploadEnabled && features.isNextcloud)
+      this.uploadStrategy = (FIXED.chunkedUploadEnabled && features.isNextcloud && features.hasAccountDav)
         ? new ChunkedUploadStrategy(uploadConfig)
         : new SimpleUploadStrategy(uploadConfig);
       this.opts.onFeatures?.(features);
@@ -351,6 +424,8 @@ export class SyncEngine {
       // skipped and the engine would balk forever as "already running".
       void this.opts.logger?.log('sync: connecting (ensureClient)');
       await this.ensureClient();
+      this.plugins.begin();
+      this.invalidateRootEtagOnScopeChange();
       this.syncProgress = { processed: 0, total: 0 };
       this.opts.statusBar.setStatus('syncing', { automatic: !manual });
 
@@ -380,20 +455,64 @@ export class SyncEngine {
       summary.completedAt = Date.now();
       this.lastSummary = summary;
       this.opts.stateDB.setLastSyncTime(Date.now());
-      // Best-effort: a save failure must not escape the finally and mask the original error.
-      try {
-        await this.opts.stateDB.save();
-        await this.opts.historyStore?.save();
-      } catch (persistErr) {
-        console.error('[SyncEngine] Post-sync persistence failed:', persistErr);
-        void this.opts.logger?.log(`sync: post-sync save failed — ${(persistErr as Error).message}`, 'error');
-      }
+      this.finishPluginSession(summary);
+      await this.persistAfterSession();
       const conflictCount = this.opts.stateDB.countConflicted();
       this.opts.statusBar.setSyncComplete(
         summary.uploadedCount, summary.downloadedCount,
         conflictCount, summary.errorCount,
       );
       // Result display is owned by the status bar surface (StatusBarItem / NoticeStatusBar) via setSyncComplete.
+    }
+  }
+
+  // A changed sync scope (or a state saved before the fingerprint existed) makes the stored root ETag
+  // meaningless: files that were out of scope never entered the tracked listing a short-circuit rebuilds
+  // (docs/spec.md §8a.5).
+  private invalidateRootEtagOnScopeChange(): void {
+    const { syncConfigFolder, configSync, excludedFolders, syncedCommunityPlugins } = this.opts.settings;
+    const fingerprint = computeSyncScopeFingerprint({ syncConfigFolder, configSync, excludedFolders, syncedCommunityPlugins });
+    if (this.opts.stateDB.getSyncScopeFingerprint() === fingerprint) return;
+    this.opts.stateDB.setRemoteRootEtag(null);
+    this.opts.stateDB.setSyncScopeFingerprint(fingerprint);
+  }
+
+  // Best-effort: a plugin-session failure must not escape the finally and mask the original error.
+  private finishPluginSession(summary: SyncSessionSummary): void {
+    try {
+      const out = this.plugins.finish();
+      summary.pluginsNeedingRestart = out.pluginsNeedingRestart;
+      if (out.invalidateRootEtag) this.opts.stateDB.setRemoteRootEtag(null);
+    } catch (e) {
+      void this.opts.logger?.log(`sync: plugin session finish failed — ${(e as Error).message}`, 'error');
+    }
+  }
+
+  // Best-effort: a save failure must not escape the finally and mask the original error.
+  private async persistAfterSession(): Promise<void> {
+    try {
+      await this.opts.stateDB.save();
+      await this.opts.historyStore?.save();
+    } catch (persistErr) {
+      console.error('[SyncEngine] Post-sync persistence failed:', persistErr);
+      void this.opts.logger?.log(`sync: post-sync save failed — ${(persistErr as Error).message}`, 'error');
+    }
+  }
+
+  // Selects the listed plugins for this session, then forgets tracking of plugins that must not be treated as
+  // removed from the server (docs/spec.md §7).
+  private async preparePluginSession(client: IWebDAVClient, remoteFiles: readonly RemoteFileInfo[]): Promise<void> {
+    await this.plugins.prepare(client, remoteFiles);
+    this.dropStalePluginTracking();
+  }
+
+  private dropStalePluginTracking(): void {
+    for (const id of this.plugins.staleTrackedIds()) {
+      dropSubtreeTracking({
+        stateDB: this.opts.stateDB,
+        mergeBase: this.mergeBase,
+        dropCleanSnapshot: (p) => this.resolution.dropCleanSnapshot(p),
+      }, pluginDirPath(id, this.opts.configDir));
     }
   }
 
@@ -457,8 +576,8 @@ export class SyncEngine {
     return effectiveMassDeleteLimit(this.opts.settings.massDeleteLimit, tracked);
   }
 
-  private recordMergeBase(path: string, content: string): void {
-    this.mergeBase.record(path, content);
+  private recordMergeBase(path: string, body: ArrayBuffer): void {
+    this.mergeBase.recordBytes(path, body);
   }
 
   private dropMergeBase(path: string): void {
@@ -659,6 +778,7 @@ export class SyncEngine {
       void this.opts.logger?.log('sync: INITIAL — no vault folder on the server yet; the first upload will create it');
       remoteFiles = [];
     }
+    await this.preparePluginSession(client, remoteFiles);
     const localFiles = await this.scanLocalFiles();
 
     // Server-computed checksums (no download) let identical files count as unchanged rather than conflicts.
@@ -742,15 +862,17 @@ export class SyncEngine {
       return;
     }
 
-    const retried = this.retryQueue.splice(0);
-    summary.retriedFiles = retried;
+    summary.retriedFiles = this.retryQueue.splice(0);
 
+    await this.preparePluginSession(client, remoteFiles);
     const eligible = remoteFiles.filter(f => !this.isSystemExcluded(f.path));
     this.syncProgress = { processed: 0, total: eligible.length };
     if (eligible.length > 0) this.opts.statusBar.setProgress(0, eligible.length);
-    // Bounded parallel; uploads to the same directory are serialized to avoid 423s.
+    // Bounded parallel; uploads to the same directory are serialized to avoid 423s. A plugin's manifest.json goes last so a
+    // half-written bundle never advertises a new version (docs/spec.md §7).
+    const { rest, manifests } = partitionPluginManifestsLast(eligible, (f) => f.path, this.opts.configDir);
     await this.runFileBatch(
-      eligible,
+      [...rest, ...manifests],
       (r) => r.path,
       (r) => r.size,
       async (r) => { await this.processFileWithRetry(r, summary); this.tickProgress(); },
@@ -871,6 +993,9 @@ export class SyncEngine {
       localChanged = false;
     }
 
+    const plugin = { localPresent: localStat !== null, localHash, localChanged, remoteId, idType };
+    if (await this.applyPluginFileAction(remote, base, plugin, summary)) return;
+
     // Previously synced but gone locally: this device deleted it. Propagate rather than re-download (which resurrects it).
     if (!localStat && base) {
       await this.applyLocalDeletion(remote, base, remoteId, idType, summary);
@@ -882,6 +1007,7 @@ export class SyncEngine {
         && localStat.size === remote.size && checksumProvesIdentical(remote, localHash)) {
       void this.opts.logger?.log(`sync: content identical to the remote (checksum) → state converged, no transfer → ${remote.path}`);
       this.opts.stateDB.setFile(await this.withLocalSignature(convergedState(remote, localHash, localStat), remote.lastModified));
+      await this.creationTime.align(this.client!, remote, localStat);
       return;
     }
 
@@ -899,21 +1025,12 @@ export class SyncEngine {
       if (base?.isConflicted) {
         this.opts.stateDB.setFile({ ...base, isConflicted: false });
       }
+      await this.creationTime.align(this.client!, remote, localStat);
       return;
     }
 
     if (localChanged && !remoteChanged) {
-      try {
-        await this.uploadFile(remote.path, localHash, remoteId, idType, remote, summary);
-      } catch (err) {
-        // If-Match 412: the remote changed between PROPFIND and PUT, so treat it as a conflict instead of overwriting (docs/spec.md §6.5).
-        if (err instanceof PreconditionFailedError) {
-          void this.opts.logger?.log(`upload: If-Match 412 (remote changed during sync) → conflict → ${remote.path}`);
-          await this.handleConflict(remote.path, base, remote, remoteId, idType, summary);
-        } else {
-          throw err;
-        }
-      }
+      await this.uploadOrConflict(remote, base, localHash, remoteId, idType, summary);
     } else if (!localChanged && remoteChanged) {
       if (this.deferIfBeingEdited(remote.path, 'download')) return;
       await this.downloadFile(remote, remoteId, idType, summary);
@@ -921,6 +1038,59 @@ export class SyncEngine {
       if (this.deferIfBeingEdited(remote.path, 'conflict')) return;
       await this.handleConflict(remote.path, base, remote, remoteId, idType, summary);
     }
+  }
+
+  // If-Match 412: the remote changed between PROPFIND and PUT, so treat it as a conflict instead of overwriting (docs/spec.md §6.5).
+  private async uploadOrConflict(
+    remote: RemoteFileInfo, base: FileState | undefined, localHash: string,
+    remoteId: string, idType: FileState['idType'], summary: SyncSessionSummary,
+  ): Promise<void> {
+    try {
+      await this.uploadFile(remote.path, localHash, remoteId, idType, remote, summary);
+    } catch (err) {
+      if (!(err instanceof PreconditionFailedError)) throw err;
+      void this.opts.logger?.log(`upload: If-Match 412 (remote changed during sync) → conflict → ${remote.path}`);
+      await this.handleConflict(remote.path, base, remote, remoteId, idType, summary);
+    }
+  }
+
+  // Applies the bundle direction of a listed plugin to one of its code or data files. Returns true when the file was
+  // handled here; false leaves it to the regular decision (docs/spec.md §7).
+  private async applyPluginFileAction(
+    remote: RemoteFileInfo, base: FileState | undefined,
+    side: { localPresent: boolean; localHash: string; localChanged: boolean; remoteId: string; idType: FileState['idType'] },
+    summary: SyncSessionSummary,
+  ): Promise<boolean> {
+    const action = this.plugins.fileAction(remote.path, {
+      localPresent: side.localPresent, remotePresent: true, tracked: base !== undefined,
+      sameContent: fileSameContent({
+        localHash: side.localPresent ? side.localHash : null, remote, base: base ?? null, localChanged: side.localChanged,
+      }),
+    });
+    switch (action) {
+      case 'download':
+        if (!this.deferIfBeingEdited(remote.path, 'download')) await this.downloadFile(remote, side.remoteId, side.idType, summary);
+        return true;
+      case 'upload':
+        await this.uploadOrConflict(remote, base, side.localHash, side.remoteId, side.idType, summary);
+        return true;
+      case 'hold':
+        await this.handleConflict(remote.path, base, remote, side.remoteId, side.idType, summary);
+        return true;
+      case 'skip':
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  // True when a listed plugin file exists on one side only and the bundle direction says it must stay there.
+  private pluginSkips(path: string, side: 'local-only' | 'remote-only'): boolean {
+    if (!this.plugins.isPluginPath(path)) return false;
+    return this.plugins.fileAction(path, {
+      localPresent: side === 'local-only', remotePresent: side === 'remote-only',
+      tracked: !!this.opts.stateDB.getFile(path), sameContent: false,
+    }) === 'skip';
   }
 
   // Defers the whole decision, not just the write: a new baseline is recorded with it, and skipping only the write would
@@ -1005,7 +1175,9 @@ export class SyncEngine {
     path: string, remote: RemoteFileInfo, remoteData: ArrayBuffer,
     remoteId: string, idType: FileState['idType'], summary: SyncSessionSummary,
   ): Promise<void> {
-    return this.conflicts.resolveByPreferRemote(path, remote, remoteData, remoteId, idType, summary);
+    return this.conflicts.resolveByPreferRemote(
+      path, remote, remoteData, remoteId, idType, summary, this.currentConnection().client,
+    );
   }
 
   private resolveByWrite(
@@ -1040,7 +1212,7 @@ export class SyncEngine {
 
     // Cheap synchronous pre-filter, then bounded-parallel upload; the content-hash check stays in the worker because it needs a read.
     const uploadCandidates = [...localStats.entries()].filter(([path, st]) => {
-      if (remotePathSet.has(path)) return false;
+      if (remotePathSet.has(path) || this.pluginSkips(path, 'local-only')) return false;
       const base = this.opts.stateDB.getFile(path);
       // Skip files whose post-write stat signature is unchanged (no read, no hash); an mtime filter is always false on mobile.
       return !(base && this.isLocallyUnchanged(base, st));
@@ -1061,7 +1233,7 @@ export class SyncEngine {
         try {
           await this.uploadFile(
             path, localHash, remoteId, idType,
-            { path, fileId: base?.remoteFileId ?? null, checksum: null, etag: null, size: st.size, lastModified: st.mtime },
+            { path, fileId: base?.remoteFileId ?? null, checksum: null, etag: null, size: st.size, lastModified: st.mtime, creationTime: 0 },
             summary,
           );
         } catch (err) {
@@ -1182,7 +1354,7 @@ export class SyncEngine {
 
     for (const [path, lf] of localFiles) {
       const remote = remoteMap.get(path);
-      if (!remote) { uploads.push(path); continue; }
+      if (!remote) { if (!this.pluginSkips(path, 'local-only')) uploads.push(path); continue; }
       if (remote.size !== lf.size) { conflicts.push(path); continue; }
       // Hash only to prove "unchanged", and only when the server supplied a checksum; otherwise (or above the size gate)
       // fall back to conflict resolution without reading the file.
@@ -1193,7 +1365,7 @@ export class SyncEngine {
     }
     for (const remote of remoteFiles) {
       if (this.isSystemExcluded(remote.path)) continue;
-      if (!localFiles.has(remote.path)) downloads.push(remote.path);
+      if (!localFiles.has(remote.path) && !this.pluginSkips(remote.path, 'remote-only')) downloads.push(remote.path);
     }
     return { uploads, downloads, conflicts, unchanged, deletes: [] };
   }
@@ -1219,35 +1391,28 @@ export class SyncEngine {
           const data = await this.opts.localAdapter.readBinary(path);
           // Hash from the bytes just read; reused for the OC-Checksum upload header so the client does not hash twice.
           const localHash = await sha256(data);
-          const outcome = await this.uploadStrategy!.upload(this.client!, path, data, lf.mtime, { precomputedSha256: localHash });
+          // The local creation time is read before the upload; a server value for the same path is honoured (docs/spec.md §9.7).
+          const before = await this.opts.localAdapter.stat(path);
+          const ctime = uploadCreationTimeMs(before?.ctime, remoteMap.get(path)?.creationTime ?? 0);
+          const outcome = await this.uploadStrategy!.upload(this.client!, path, data, lf.mtime, { precomputedSha256: localHash, ctime });
           if (outcome === 'skipped') { this.tickProgress(); return; }
           summary.uploadedCount++;
           this.recordHistory(path, 'uploaded');
           const stat = await this.opts.localAdapter.stat(path);
           this.opts.stateDB.setFile(await this.withLocalSignature({ path, localHash, remoteId: localHash, idType: 'sha256', size: lf.size, mtime: stat?.mtime ?? 0, remoteFileId: null, isConflicted: false }));
           // This batch bypasses uploadFile, so it seeds its own merge base; without it a later concurrent edit duplicates shared blocks.
-          this.recordMergeBase(path, new TextDecoder().decode(data));
+          this.recordMergeBase(path, data);
         } catch (err) { this.recordError(summary, path, err); this.retryQueue.push(path); }
         this.tickProgress();
       },
       true,
     );
 
-    // No directory serialization: each worker writes a distinct local file.
-    await this.runFileBatch(
-      plan.downloads,
-      (path) => path,
-      (path) => remoteMap.get(path)?.size ?? 0,
-      async (path) => {
-        try {
-          const remote = remoteMap.get(path)!;
-          const { remoteId, idType } = remoteIdOf(remote);
-          await this.downloadFile(remote, remoteId, idType, summary);
-        } catch (err) { this.recordError(summary, path, err); this.retryQueue.push(path); }
-        this.tickProgress();
-      },
-      false,
-    );
+    // A plugin's manifest.json is written after every other code file of its bundle (docs/spec.md §7): downloads' rest,
+    // then conflicts' rest, then the manifests.
+    const dl = partitionPluginManifestsLast(plan.downloads, (path) => path, this.opts.configDir);
+    const cf = partitionPluginManifestsLast(plan.conflicts, (path) => path, this.opts.configDir);
+    await this.downloadPlanned(dl.rest, remoteMap, summary);
 
     // Identical on both sides: seed State with no transfer and no local write (the local mtime is left unchanged).
     for (const path of plan.unchanged) {
@@ -1260,9 +1425,38 @@ export class SyncEngine {
         path, localHash: remote.checksum!, remoteId: remote.checksum!, idType: 'sha256',
         size: lf.size, mtime, remoteFileId: remote.fileId, isConflicted: false,
       }, remote.lastModified));
+      await this.creationTime.align(this.client!, remote);
     }
 
-    for (const path of plan.conflicts) {
+    await this.resolvePlannedConflicts(cf.rest, remoteMap, summary);
+    await this.downloadPlanned(dl.manifests, remoteMap, summary);
+    await this.resolvePlannedConflicts(cf.manifests, remoteMap, summary);
+  }
+
+  private async downloadPlanned(
+    paths: string[], remoteMap: Map<string, RemoteFileInfo>, summary: SyncSessionSummary,
+  ): Promise<void> {
+    // No directory serialization: each worker writes a distinct local file.
+    await this.runFileBatch(
+      paths,
+      (path) => path,
+      (path) => remoteMap.get(path)?.size ?? 0,
+      async (path) => {
+        try {
+          const remote = remoteMap.get(path)!;
+          const { remoteId, idType } = remoteIdOf(remote);
+          await this.downloadFile(remote, remoteId, idType, summary);
+        } catch (err) { this.recordError(summary, path, err); this.retryQueue.push(path); }
+        this.tickProgress();
+      },
+      false,
+    );
+  }
+
+  private async resolvePlannedConflicts(
+    paths: string[], remoteMap: Map<string, RemoteFileInfo>, summary: SyncSessionSummary,
+  ): Promise<void> {
+    for (const path of paths) {
       try {
         const remote = remoteMap.get(path)!;
         const { remoteId, idType } = remoteIdOf(remote);
@@ -1302,7 +1496,9 @@ export class SyncEngine {
     return this.remoteListing.rebuildRemoteDirsFromState();
   }
 
-  // Rules and the remote-deletion scope guard live in ./policy so they can be tested without an engine.
+  // Rules and the remote-deletion scope guard live in ./policy so they can be tested without an engine. Community
+  // plugin files are decided by the ConfigSyncResolver.isIncluded gate: only the files of a plugin listed for this
+  // session pass, every other path under plugins/ is excluded.
   private isSystemExcluded(path: string): boolean {
     return isSystemExcludedPure(path, {
       excludedFolders: this.opts.settings?.excludedFolders ?? [],

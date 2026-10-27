@@ -31,10 +31,9 @@ This plugin is still young and some behaviour can be rough around the edges. **P
 
 ---
 
-## What's new in this release (1.0.12)
+## What's new in this release (1.0.13-beta.5)
 
-- **Downloaded files keep the server's modification time on every device (1.0.12)** — a file downloaded from Nextcloud now gets the same modification time as on the server, on mobile as well as on desktop, so "sort by modified time" shows the same order on every device. A merged note (automatic merge, conflict markers, or a resolved conflict) gets the time of the merge, on your device and on the server. A sync that writes no content leaves the time unchanged. There is no new setting.
-- **Quieter automatic syncs on mobile (1.0.12)** — a sync that you did not start (startup, returning to the app, periodic, or sync-on-edit) no longer shows a toast when nothing was transferred and there are no errors or conflicts, so reopening Obsidian does not leave a notification to dismiss. Errors and conflicts are still reported, and "Sync now" and "Mirror from remote" show their toasts as before. A sync-on-edit toast that could stay on screen is also gone. There is no new setting.
+- **Dependency update and a safer password-secret selection (1.0.13-beta.5)** — the libraries and the build and test toolchain are updated to their latest compatible versions. Clearing the selected password secret in the settings is now stored as "not set", so sign-in falls back to the default secret name exactly as before instead of keeping an invalid value. There is no setting and sync behaviour is unchanged.
 
 For the full version history of every release, see the **[changelog](CHANGELOG.md)**.
 
@@ -67,7 +66,8 @@ If you point it at a non-Nextcloud WebDAV server, it automatically disables the 
 - **Rename / move tracking** via Nextcloud file IDs — moving a note doesn't re-upload it everywhere.
 - **Trashbin deletes** — remote deletions use the Nextcloud trashbin (recoverable). When a deletion is applied to your local Vault, it follows **your Obsidian "Deleted files" setting** (system trash / move to `.trash` / permanently delete) rather than forcing one behavior; folders and files outside the Vault's tracked notes (e.g. config-folder files) are handled too.
 - **Per-Vault configuration** — each Vault can target a different Nextcloud server / account without state bleeding between them.
-- **Excluded folders** — register Vault-relative folders that are never synced (neither uploaded nor downloaded, and never created on the server). Useful for version-control or tooling folders such as `.git`, and for large media you keep device-local. Matching is a folder-prefix match at a folder boundary, so `Attachments` excludes `Attachments/` and everything under it but not `Attachments-old`. Add or remove entries under **Settings → Excluded folders** (type a path or use the folder picker). Dotfolders (`.git`, the config-folder `plugins/`, the plugin's own state) are already excluded automatically; this list is an additive layer on top.
+- **Community plugin sync (opt-in, per plugin)** — with **Sync config folder** on, pick community plugins under **Choose plugins…** and their four files (`manifest.json`, `main.js`, `styles.css`, `data.json`, directly in the plugin folder) sync between devices that both list the plugin. **Dangerous:** syncing a plugin copies its code to your other devices, where Obsidian runs it; only sync plugins you trust. Each device keeps its own list, and turning a plugin on or off is never synced.
+- **Excluded folders** — register Vault-relative folders that are never synced (neither uploaded nor downloaded, and never created on the server). Useful for version-control or tooling folders such as `.git`, and for large media you keep device-local. Matching is a folder-prefix match at a folder boundary, so `Attachments` excludes `Attachments/` and everything under it but not `Attachments-old`. Add or remove entries under **Settings → Excluded folders** (type a path or use the folder picker). Dotfolders (`.git`, this plugin's own folder and state, and community plugins you have not picked) are already excluded automatically; this list is an additive layer on top.
 - **Periodic auto-sync** with a configurable interval (set to `0` for manual-only), plus a **Sync now** command.
 - **Sync on file change (watch mode)** — optionally sync immediately after you create, edit, delete, or rename a file **or folder** (file edits are debounced ~2s after you stop typing; deletes, renames and folder operations propagate right away). The status bar shows when a change is being pushed. Toggle on/off in settings; works alongside the periodic interval. Available on desktop and mobile — off by default on mobile, where it runs only while Obsidian is open and anything it misses is sent on the next sync. Paused on cellular when **Sync on Wi-Fi only** is on.
 - **Resilient retries** — failed files are skipped, queued, and retried next sync with exponential backoff; a dropped Wi-Fi connection resumes automatically.
@@ -166,13 +166,13 @@ If the Vault on the second device is **not** empty, back it up first. The first 
 
 Yes. If you'd rather not hand the plugin an app password with full account access, you can share a single directory as a **Public Link Share with username/password** on the Nextcloud side, then point the plugin at it:
 
-- **Server URL:** `https://<host>/public.php/webdav/`
+- **Server URL:** `https://<host>/public.php/webdav/` (the newer form `https://<host>/public.php/dav/files/<token>/` also works)
 - **Username:** the share token (the part of the share link after `/s/`)
 - **App password:** the share's password
 
 One point of confusion here: when you click **Link…** to store the app password, you're asked for an **ID** and a **value**. The **ID is a local storage key inside Obsidian's encrypted Secret Storage — it is never sent to the server**, so it can be anything (e.g. `default`); it's restricted to lowercase letters/digits/dashes because that's an Obsidian platform constraint, not something this plugin controls. The actual share password goes in the **value**, which accepts any characters. Put the share token in the **Username** field, not in the ID field.
 
-Note: version history / restore and chunked upload are optional convenience features layered on top of core sync; they haven't been verified against Public Link Share endpoints and may not work there. Basic upload/download sync is unaffected.
+Note: the plugin detects a Public Link Share automatically. On a share it does not use version history / restore or chunked upload (both need account-only endpoints that a share cannot reach), and large files are uploaded in a single request. Everything else, including the fast change detection, works as with an account URL.
 
 ---
 
@@ -245,6 +245,7 @@ These are the options you can change. Most start the same on both platforms; a f
 | Sync on Wi-Fi only | off | on |
 | Sync config folder (master) | off | off |
 | └ Bookmarks / Other settings | on / on | on / on |
+| └ Choose plugins… (synced community plugins, per device) | empty | empty |
 | Auto merge file types | md, txt, cpp, py, c, h, hpp, rs, go, ts, js, java, sh | same |
 | Auto merge file strategy | Merge | Merge |
 | Other file strategy | Latest modified | Latest modified |
@@ -298,14 +299,14 @@ These tests exist specifically to prevent sync-inconsistency states — **data l
 - App passwords / credentials are kept in Obsidian's **secret credentials store**, never written in plain text to `data.json`.
 - Your **main account password is never used or stored** — only app passwords (issued manually or via Login Flow v2).
 - All network traffic uses Obsidian's `requestUrl` API.
-- The Obsidian config folder (`.obsidian/`) is excluded from sync by default — only your notes and other vault files are synced. You can opt in to syncing selected parts of it via **Sync config folder** (see below). **Community plugins (`.obsidian/plugins/`) and the plugin's own sync-state database are never synced**, regardless of settings — they hold executable code and device-specific state, which is unsafe to overwrite across devices.
+- The Obsidian config folder (`.obsidian/`) is excluded from sync by default — only your notes and other vault files are synced. You can opt in to syncing selected parts of it via **Sync config folder** (see below). **This plugin's own folder and its sync-state database never sync**, regardless of settings — they hold device-specific state, which is unsafe to overwrite across devices. Other community plugins (`.obsidian/plugins/`) sync only when you pick them under **Choose plugins…**; because that copies executable code to your other devices, it is marked **Dangerous** and needs two confirmations.
 
 ---
 
 ## Limitations
 
 - **End-to-end encryption (E2EE)** relies on the HTTPS transport layer; the plugin does not add a redundant encryption layer of its own. This is a deliberate trade-off favouring maximum transport security and performance.
-- **Config folder sync is opt-in.** Enable **Sync config folder** in settings to sync `.obsidian/` config across devices, chosen with two toggles: **Bookmarks** and **Other settings** (appearance, themes & snippets, hotkeys, and core-plugin settings). **Community plugins and the plugin's own sync-state database are never synced** (executable code / device-specific state). A synced change to core-plugin settings may require an Obsidian restart on the other device to take effect.
+- **Config folder sync is opt-in.** Enable **Sync config folder** in settings to sync `.obsidian/` config across devices, chosen with two toggles: **Bookmarks** and **Other settings** (appearance, themes & snippets, hotkeys, and core-plugin settings). **This plugin's own folder and its sync-state database never sync** (device-specific state). Community plugins sync only when you pick them with **Choose plugins…** (`manifest.json`, `main.js`, `styles.css` and `data.json` only; **Dangerous**, as it copies executable code to your other devices). A synced change to core-plugin settings may require an Obsidian restart on the other device to take effect.
 - Designed primarily for Markdown / text Vaults; single files in the hundreds-of-MB range are beyond the v1 design target.
 - Keep the Vault on local storage — don't double-manage it with another cloud sync (e.g. iCloud Drive) at the same time.
 - Nextcloud-specific features require a compatible server version; older or non-Nextcloud servers transparently fall back to core WebDAV sync.

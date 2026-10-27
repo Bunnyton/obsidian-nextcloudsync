@@ -39,6 +39,8 @@ export interface MirrorResult {
   skipped: number;
   createdDirs: number;
   errors: Array<{ path: string; message: string }>;
+  /** Sorted IDs of enabled plugins whose code was written locally by the mirror; they need a restart. */
+  pluginsNeedingRestart: string[];
 }
 
 function depth(path: string): number {

@@ -6,6 +6,7 @@ import { StateDB } from '../../../src/data/StateDB';
 import { MergeBaseStore } from '../../../src/data/MergeBaseStore';
 import { CleanSideStore } from '../../../src/data/CleanSideStore';
 import { NextcloudClient } from '../../../src/network/NextcloudClient';
+import type { CreationTimeSupport } from '../../../src/data/creationTimeProbe';
 import { IWebDAVClient } from '../../../src/network/IWebDAVClient';
 import { DavSyncSettings, DEFAULT_SETTINGS, NextcloudFeatures } from '../../../src/types';
 import { LiveEnv } from './env';
@@ -32,7 +33,7 @@ export interface Device {
 
 export function makeDevice(
   env: LiveEnv, remoteBase: string, deviceId: string, over: Partial<DavSyncSettings> = {},
-  vault: FakeVault = new FakeVault(),
+  vault: FakeVault = new FakeVault(), creationTimeSupport: CreationTimeSupport = 'settable',
 ): Device {
   const settings: DavSyncSettings = {
     ...DEFAULT_SETTINGS,
@@ -41,7 +42,7 @@ export function makeDevice(
     deviceId,
     ...over,
   };
-  const localAdapter = new LocalAdapter(vault.adapter, vault.vault);
+  const localAdapter = new LocalAdapter(vault.adapter, vault.vault, undefined, async () => creationTimeSupport);
   const stateDB = new StateDB(vault.adapter, PLUGIN_DIR, deviceId);
   // Per-device merge base store wired as in production, so b1 runs the real 3-way merge with a true base.
   const baseStore = new MergeBaseStore(vault.adapter, PLUGIN_DIR, deviceId);

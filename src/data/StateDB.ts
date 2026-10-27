@@ -162,6 +162,15 @@ export class StateDB {
     this.state.remoteRootEtag = etag;
   }
 
+  // null => older state file; the next sync treats the scope as changed and does a real scan.
+  getSyncScopeFingerprint(): string | null {
+    return this.state.syncScopeFingerprint ?? null;
+  }
+
+  setSyncScopeFingerprint(fp: string): void {
+    this.state.syncScopeFingerprint = fp;
+  }
+
   getFullScanSkipCount(): number {
     return this.state.fullScanSkipCount ?? 0;
   }

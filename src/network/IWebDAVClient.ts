@@ -55,7 +55,7 @@ export interface IWebDAVClient {
    */
   uploadFile(
     remotePath: string, data: ArrayBuffer, mtime?: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; ctime?: number },
   ): Promise<void>;
   moveFile(oldPath: string, newPath: string): Promise<void>;
   deleteFile(path: string, expectedRemoteId: string): Promise<void>;
@@ -85,8 +85,16 @@ export interface IWebDAVClient {
    */
   uploadChunked(
     remotePath: string, data: ArrayBuffer, chunkSizeBytes: number,
-    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null },
+    opts?: { precomputedSha256?: string; ifMatchEtag?: string | null; mtime?: number; ctime?: number },
   ): Promise<void>;
+
+  /**
+   * Sets the server creation time without sending the body (PROPPATCH nc:creation_time, docs/spec.md §9.7).
+   * @param seconds Unix seconds, > MIN_VALID_CREATION_SECONDS
+   * @returns 'applied' (207 with a 200 propstat for the property), 'rejected' (the server refused it, or the client cannot express it)
+   * @throws NetworkError on a transport failure, 401, 404, 423, 5xx or any other status (transient: retried by the next real scan)
+   */
+  setCreationTime(remotePath: string, seconds: number): Promise<'applied' | 'rejected'>;
 
   /** Acquires a file lock and returns the token. @throws FileLockedError on HTTP 423. */
   lockFile(remotePath: string): Promise<string>;

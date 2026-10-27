@@ -2,7 +2,8 @@
 // and explicitly via mkdir/seedFolder; trashing a folder removes its whole subtree.
 import { App, DataAdapter, TFile, TFolder, Vault } from 'obsidian';
 
-interface Entry { data: ArrayBuffer; mtime: number; }
+interface Entry { data: ArrayBuffer; mtime: number; ctime: number; }
+interface WriteOpts { mtime?: number; ctime?: number }
 
 const enc = (s: string): ArrayBuffer => new TextEncoder().encode(s).buffer as ArrayBuffer;
 const dec = (a: ArrayBuffer): string => new TextDecoder().decode(a);
@@ -38,6 +39,9 @@ export class FakeVault {
     const trashed = this.trashed;
     const self = this;
 
+    // options.ctime when given; otherwise an overwrite keeps the existing entry's ctime and a new file gets the write time.
+    const ctimeFor = (p: string, options?: WriteOpts): number => options?.ctime ?? store.get(p)?.ctime ?? Date.now();
+
     const addAncestors = (p: string): void => { for (const a of ancestorsOf(p)) explicitFolders.add(a); };
 
     this.adapter = {
@@ -46,22 +50,36 @@ export class FakeVault {
         if (!e) throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
         return dec(e.data);
       },
-      async write(p: string, d: string, options?: { mtime?: number }): Promise<void> { addAncestors(p); store.set(p, { data: enc(d), mtime: options?.mtime ?? Date.now() }); },
+      async write(p: string, d: string, options?: WriteOpts): Promise<void> { addAncestors(p); store.set(p, { data: enc(d), mtime: options?.mtime ?? Date.now(), ctime: ctimeFor(p, options) }); },
       async readBinary(p: string): Promise<ArrayBuffer> {
         const e = store.get(p);
         if (!e) throw Object.assign(new Error(`ENOENT: ${p}`), { code: 'ENOENT' });
         return e.data;
       },
-      async writeBinary(p: string, d: ArrayBuffer, options?: { mtime?: number }): Promise<void> { addAncestors(p); store.set(p, { data: d, mtime: options?.mtime ?? Date.now() }); },
+      async writeBinary(p: string, d: ArrayBuffer, options?: WriteOpts): Promise<void> { addAncestors(p); store.set(p, { data: d, mtime: options?.mtime ?? Date.now(), ctime: ctimeFor(p, options) }); },
+      // Appends to the body (creating the file when absent) and applies the options' ctime / mtime like the real adapter.
+      async append(p: string, d: string, options?: WriteOpts): Promise<void> {
+        const e = store.get(p);
+        addAncestors(p);
+        const body = enc(d);
+        const merged = new Uint8Array((e?.data.byteLength ?? 0) + body.byteLength);
+        if (e) merged.set(new Uint8Array(e.data), 0);
+        merged.set(new Uint8Array(body), e?.data.byteLength ?? 0);
+        store.set(p, {
+          data: merged.buffer as ArrayBuffer,
+          mtime: options?.mtime ?? Date.now(),
+          ctime: ctimeFor(p, options),
+        });
+      },
       async exists(p: string): Promise<boolean> { return store.has(p) || self.folderExists(p); },
       async remove(p: string): Promise<void> { store.delete(p); explicitFolders.delete(p); },
       async rename(from: string, to: string): Promise<void> {
         const e = store.get(from);
         if (e) { addAncestors(to); store.set(to, e); store.delete(from); }
       },
-      async stat(p: string): Promise<{ size: number; mtime: number } | null> {
+      async stat(p: string): Promise<{ size: number; mtime: number; ctime: number } | null> {
         const e = store.get(p);
-        return e ? { size: e.data.byteLength, mtime: e.mtime } : null;
+        return e ? { size: e.data.byteLength, mtime: e.mtime, ctime: e.ctime } : null;
       },
       // Full vault-relative paths of the immediate children of `path` (mirrors Obsidian's adapter.list).
       async list(path: string): Promise<{ files: string[]; folders: string[] }> {
@@ -94,7 +112,7 @@ export class FakeVault {
       getFiles(): TFile[] {
         return [...store.entries()]
           .filter(([p]) => !p.endsWith('.ncs.tmp') && !p.endsWith('.nextcloudsync.tmp'))
-          .map(([p, e]) => ({ path: p, stat: { ctime: 0, mtime: e.mtime, size: e.data.byteLength } } as unknown as TFile));
+          .map(([p, e]) => ({ path: p, stat: { ctime: e.ctime, mtime: e.mtime, size: e.data.byteLength } } as unknown as TFile));
       },
       getAllFolders(): TFolder[] {
         return [...self.allFolderPaths()].map((p) => mkFolder(p));
@@ -137,9 +155,12 @@ export class FakeVault {
 
   seedLocal(path: string, content: string): void {
     for (const a of ancestorsOf(path)) this.explicitFolders.add(a);
-    this.store.set(path, { data: enc(content), mtime: Date.now() });
+    const now = Date.now();
+    this.store.set(path, { data: enc(content), mtime: now, ctime: now });
   }
   seedFolder(path: string): void { this.explicitFolders.add(path); for (const a of ancestorsOf(path)) this.explicitFolders.add(a); }
+  setCtime(path: string, ctimeMs: number): void { const e = this.store.get(path); if (e) e.ctime = ctimeMs; }
+  getCtime(path: string): number | undefined { return this.store.get(path)?.ctime; }
   readLocal(path: string): string | null { const e = this.store.get(path); return e ? dec(e.data) : null; }
   localExists(path: string): boolean { return this.store.has(path); }
   isTrashed(path: string): boolean { return this.trashed.has(path); }

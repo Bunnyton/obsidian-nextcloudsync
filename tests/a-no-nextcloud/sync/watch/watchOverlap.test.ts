@@ -16,6 +16,7 @@ import { RenameTracker } from '../../../../src/sync/RenameTracker';
 import { FileState, RemoteFileInfo, SyncSessionSummary } from '../../../../src/types';
 import { IWebDAVClient } from '../../../../src/network/IWebDAVClient';
 import { IUploadStrategy } from '../../../../src/sync/upload/IUploadStrategy';
+import { noPluginPath } from '../../support/pluginPorts';
 
 const PATH = 'note.md';
 const tick = () => new Promise((r) => setTimeout(r, 0));
@@ -70,13 +71,14 @@ function buildRacy() {
     historyStore: { save: async () => undefined } as unknown as WatchDeps['historyStore'],
     statusBar: { setStatus: () => undefined } as unknown as WatchDeps['statusBar'],
     journal: new SyncJournal({}) as unknown as SyncJournal,
-    mergeBase: { record: () => undefined, drop: () => undefined } as unknown as MergeBaseRecorder,
+    mergeBase: { record: () => undefined, recordBytes: () => undefined, drop: () => undefined } as unknown as MergeBaseRecorder,
     transfer: { uploadFile: async () => undefined } as unknown as TransferService,
     deletion: {
       applyLocalDeletion: async () => { events.push('delete'); },
     } as unknown as DeletionService,
     resolution: { dropCleanSnapshot: () => undefined } as unknown as ResolutionService,
     isSystemExcluded: () => false,
+    isPluginPath: noPluginPath,
     connect: async () => ({ client, uploadStrategy: {} as unknown as IUploadStrategy }),
     renameTracker: () => ({}) as unknown as RenameTracker,
     isBlockedByWifiOnly: () => false,

@@ -46,6 +46,7 @@ describePlainDav('[SPEC:SD-3] b-4 — plugin against a real plain WebDAV server'
         hasChecksums: false,
         hasFilesLocking: false,
         hasBulkUpload: false,
+        hasAccountDav: false,
         syncToken: null,
       });
     });
@@ -98,6 +99,41 @@ describePlainDav('[SPEC:SD-3] b-4 — plugin against a real plain WebDAV server'
       // Plain WebDAV has no file ids, so the client deletes unconditionally; the expected remote id is an empty string.
       await client.deleteFile('note.md', '');
       await expect(client.remoteExists('note.md')).resolves.toBe(false);
+    });
+  });
+
+  describe('[SPEC:CT-14] B4-1: a plain WebDAV sync never asks for a creation time', () => {
+    it('sends no X-OC-CTime header and no PROPPATCH, even when the caller passes a ctime', async () => {
+      const { client } = await connectInOwnFolder(getEnv());
+      // Records method and request headers by wrapping the fetch that this layer's requestUrl mock calls.
+      const originalFetch = globalThis.fetch;
+      const sent: Array<{ method: string; headers: Record<string, string> }> = [];
+      globalThis.fetch = ((...args: Parameters<typeof fetch>) => {
+        const init = args[1];
+        const headers: Record<string, string> = {};
+        for (const [k, v] of Object.entries((init?.headers ?? {}) as Record<string, string>)) headers[k.toLowerCase()] = String(v);
+        sent.push({ method: (init?.method ?? 'GET').toUpperCase(), headers });
+        return originalFetch(...args);
+      }) as typeof fetch;
+      try {
+        await client.createDirectory('');
+        await client.uploadFile('ctime.md', bytes('body'), 1_700_000_000_000, { ctime: 1_600_000_000_000 });
+        const listed = await client.getFiles('');
+        const stat = await client.statFile('ctime.md');
+        await client.uploadFile('ctime.md', bytes('body 2'), 1_700_000_001_000, { ctime: 1_600_000_000_000 });
+        await expect(client.setCreationTime('ctime.md', 1_600_000_000)).resolves.toBe('rejected');
+        await client.deleteFile('ctime.md', '');
+
+        // The listing carries no creation time on a plain server (the field is left undefined).
+        expect(listed.every((f) => !f.creationTime)).toBe(true);
+        expect(stat?.creationTime ?? 0).toBe(0);
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+
+      expect(sent.length).toBeGreaterThan(0);
+      expect(sent.filter((r) => 'x-oc-ctime' in r.headers)).toHaveLength(0);
+      expect(sent.filter((r) => r.method === 'PROPPATCH')).toHaveLength(0);
     });
   });
 

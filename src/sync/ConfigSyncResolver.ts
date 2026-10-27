@@ -1,5 +1,7 @@
 import { ConfigSyncCategories, DavSyncSettings } from '../types';
 import { LocalAdapter } from '../data/LocalAdapter';
+import type { PluginPathGate } from './plugins/PluginSyncCoordinator';
+import { PLUGIN_BUNDLE_FILES, parsePluginRel } from './plugins/pluginPaths';
 
 // An allowlist, not a denylist, so device-specific files (`workspace.json`) and community-origin files
 // are never swept in. `bookmarks.json` is absent on purpose: the Bookmarks category owns it.
@@ -71,6 +73,8 @@ export interface ConfigSyncResolverOptions {
   // `plugins/` rule, kept explicit as defense in depth.
   pluginDir: string;
   localAdapter: Pick<LocalAdapter, 'list' | 'stat'>;
+  // Decides which community-plugin files sync.
+  pluginGate: PluginPathGate;
 }
 
 // Single source of truth for which config-folder paths sync: `SyncEngine.isSystemExcluded`, the
@@ -96,14 +100,17 @@ export class ConfigSyncResolver {
   }
 
   // Hard exclusions are evaluated before category matching, so no toggle combination can include
-  // community-plugin code or the sync-state DB.
+  // this plugin's own folder; other plugins pass only through the gate (docs/spec.md §7).
   isIncluded(path: string): boolean {
     const rel = this.rel(path);
     if (rel === null) return false;
     if (rel === '') return false;
     if (!this.opts.settings.syncConfigFolder) return false;
     if (this.isUnderPluginDir(path)) return false;
-    if (rel === 'plugins' || rel.startsWith('plugins/')) return false;
+    if (rel === 'plugins' || rel.startsWith('plugins/')) {
+      const ref = parsePluginRel(rel);
+      return ref !== null && this.opts.pluginGate.isPluginFileIncluded(ref.id, ref.file);
+    }
     const cs = this.opts.settings.configSync;
     for (const cat of CONFIG_SYNC_CATEGORIES) {
       if (cs[cat.key] && cat.matches(rel)) return true;
@@ -115,7 +122,7 @@ export class ConfigSyncResolver {
     return this.isUnderConfigDir(path) && this.isIncluded(path);
   }
 
-  // Never lists `plugins/`; every returned path satisfies `isIncluded`.
+  // Never lists `plugins/` (gated plugin files are stat'ed directly); every returned path satisfies `isIncluded`.
   async enumerateIncludedPaths(): Promise<string[]> {
     if (!this.opts.settings.syncConfigFolder) return [];
     const cd = this.opts.configDir;
@@ -136,7 +143,17 @@ export class ConfigSyncResolver {
       await this.listRecursive(`${cd}/snippets`, out);
     }
 
-    return Array.from(new Set(out));
+    await this.addGatedPluginFiles(out);
+    return Array.from(new Set(out)).filter((p) => this.isIncluded(p));
+  }
+
+  private async addGatedPluginFiles(out: string[]): Promise<void> {
+    for (const id of this.opts.pluginGate.includedPluginIds()) {
+      for (const file of PLUGIN_BUNDLE_FILES) {
+        const p = `${this.opts.configDir}/plugins/${id}/${file}`;
+        if (await this.opts.localAdapter.stat(p)) out.push(p);
+      }
+    }
   }
 
   private async listRecursive(dir: string, out: string[]): Promise<void> {

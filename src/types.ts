@@ -80,9 +80,11 @@ export interface DavSyncSettings {
    * -1 = automatic max(20, 20% of tracked files); 0 = unlimited (risky); N > 0 = fixed limit.
    */
   massDeleteLimit: number;
-  /** Master opt-in for syncing the Obsidian config folder; community plugins and this plugin's state DB are never synced. */
+  /** Master opt-in for syncing the Obsidian config folder; this plugin's own folder is never synced, and community plugins sync only for the IDs in `syncedCommunityPlugins`. */
   syncConfigFolder: boolean;
   configSync: ConfigSyncCategories;
+  /** Per-device allow list of community plugin IDs to sync; normalized by `normalizeSyncedCommunityPlugins`. Always assign a fresh array. */
+  syncedCommunityPlugins: string[];
   /** Device label; empty derives `<platform>-<deviceId6>`. */
   deviceName: string;
   /** Vault-relative log folder; blank = vault root. */
@@ -130,6 +132,7 @@ export const DEFAULT_SETTINGS: DavSyncSettings = {
     bookmarks: true,
     others: true,
   },
+  syncedCommunityPlugins: [],
   deviceName: '',
   logsFolder: '',
   loggingEnabled: false,
@@ -168,6 +171,13 @@ export interface FileState {
   localSize?: number;
   /** Server `lastModified` at the last converged state, separate from `localMtime`. */
   remoteMtime?: number;
+  /**
+   * Target creation time (Unix seconds) of the last local creation-time fix that the platform did not apply
+   * (docs/spec.md §9.7). A planned local fix to the same target is skipped; any other target is tried.
+   */
+  ctimeLocalAttempt?: number;
+  /** Target creation time (Unix seconds) of the last server creation-time update the server rejected. */
+  ctimeRemoteAttempt?: number;
 }
 
 /** A tracked directory; `remoteFileId` (oc:fileid) is stable across MOVE for rename detection (docs/spec.md §8a.1). */
@@ -190,6 +200,8 @@ export interface SyncState {
   remoteRootEtag?: string | null;
   /** Consecutive short-circuited scans since the last real one (bounded by FORCE_FULL_SCAN_EVERY). */
   fullScanSkipCount?: number;
+  /** Fingerprint of the sync scope at the last sync; absent in older state files (treated as changed). */
+  syncScopeFingerprint?: string;
 }
 
 export interface NextcloudFeatures {
@@ -199,6 +211,12 @@ export interface NextcloudFeatures {
   hasFilesLocking: boolean;
   /** Bulk-upload endpoint `/remote.php/dav/bulk` is advertised or probed positive. */
   hasBulkUpload: boolean;
+  /**
+   * The account-only DAV namespaces (`/remote.php/dav/uploads/<user>` for chunked upload,
+   * `/remote.php/dav/versions/<user>` for version history) are reachable. False on a public link share
+   * (`/public.php/...`, whose credentials are the share token and password) and on plain WebDAV (docs/spec.md §3).
+   */
+  hasAccountDav: boolean;
   syncToken: string | null;
 }
 
@@ -209,6 +227,12 @@ export interface RemoteFileInfo {
   etag: string | null;
   size: number;
   lastModified: number;
+  /**
+   * Server creation time in ms (nc:creation_time × 1000). 0 = the server holds none.
+   * undefined = not known in this listing (plain WebDAV, a listing rebuilt from State, a synthetic entry
+   * for a path the server is not known to have).
+   */
+  creationTime?: number;
 }
 
 /** A remote directory; `fileId` (oc:fileid) is stable across MOVE and identifies it for rename detection. */
@@ -314,6 +338,8 @@ export interface SyncSessionSummary {
   conflictedCount: number;
   errorCount: number;
   retriedFiles: string[];
+  /** Sorted IDs of enabled plugins whose code was written locally this session; they need a restart. */
+  pluginsNeedingRestart: string[];
   /** Per-error details behind errorCount, shown in the sync status dialog. */
   errors: SyncErrorDetail[];
 }
